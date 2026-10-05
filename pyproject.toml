@@ -21,8 +21,10 @@ classifiers      = [
     "Typing :: Typed",
 ]
 dependencies     = [
+    "annotated-types>=0.7",
     "fastapi>=0.115",
     "gnitz>=0.1.0",
+    "pydantic>=2.11",
 ]
 
 [dependency-groups]

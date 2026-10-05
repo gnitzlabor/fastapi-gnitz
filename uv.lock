@@ -73,8 +73,10 @@ name = "fastapi-gnitz"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "annotated-types" },
     { name = "fastapi" },
     { name = "gnitz" },
+    { name = "pydantic" },
 ]
 
 [package.dev-dependencies]
@@ -87,8 +89,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "annotated-types", specifier = ">=0.7" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "gnitz", specifier = ">=0.1.0" },
+    { name = "pydantic", specifier = ">=2.11" },
 ]
 
 [package.metadata.requires-dev]

@@ -5,8 +5,10 @@ import signal
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
+import gnitz
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -77,3 +79,13 @@ def server():
             except ProcessLookupError:
                 pass
             proc.wait()
+
+
+@pytest.fixture
+def client(server):
+    """A connection in a schema of its own, dropped with everything in it."""
+    name = f"s{uuid.uuid4().hex[:12]}"
+    with gnitz.connect(server, schema=name) as conn:
+        conn.create_schema(name)
+        yield conn
+        conn.drop_schema(name)
