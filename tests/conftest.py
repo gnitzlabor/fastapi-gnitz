@@ -1,17 +1,19 @@
 import ctypes
 import os
-import shutil
 import signal
 import subprocess
 import tempfile
 import time
 import uuid
+from importlib.metadata import version
 from pathlib import Path
 
 import gnitz
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+_SERVER = _REPO_ROOT / ".gnitz" / "bin" / "gnitz-server"
+_INSTALL = f"cargo install gnitz@{version('gnitz')} --locked --root .gnitz"
 
 # What the server logs once every listener is bound and published.
 _READY_MARKER = "GnitzDB ready"
@@ -21,19 +23,11 @@ _libc = ctypes.CDLL("libc.so.6", use_errno=True)
 
 
 def _server_binary():
-    """The gnitz-server to test against: `GNITZ_SERVER_BIN`, else one on `PATH`,
-    else the one built in a `gnitzdb` checkout beside this one. The `gnitz`
-    package on PyPI is the client alone, so the server has to come from
-    somewhere else."""
-    candidates = (
-        os.environ.get("GNITZ_SERVER_BIN"),
-        shutil.which("gnitz-server"),
-        str(_REPO_ROOT.parent / "gnitzdb" / "gnitz-server"),
-    )
-    for binary in candidates:
-        if binary and os.path.isfile(binary):
-            return os.path.abspath(binary)
-    pytest.skip("no gnitz-server binary found; set GNITZ_SERVER_BIN")
+    """The gnitz-server to test against, installed into this checkout at the
+    version of the `gnitz` client: the package on PyPI is the client alone."""
+    if not _SERVER.is_file():
+        pytest.fail(f"no {_SERVER.relative_to(_REPO_ROOT)}; install it with `{_INSTALL}`")
+    return str(_SERVER)
 
 
 def _die_with_parent():

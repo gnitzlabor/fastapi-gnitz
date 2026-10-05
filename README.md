@@ -97,6 +97,7 @@ to it yet: creating the relations and reading them as models is still by hand.
 
 ```bash
 uv sync
+cargo install gnitz@0.1.0 --locked --root .gnitz
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
 uv run ty check
@@ -107,8 +108,9 @@ The pre-commit hook runs `ruff check --fix`, `ruff format` and `ty check`, each
 at the version `uv.lock` pins.
 
 The tests run against a real `gnitz-server`, which the `gnitz` package on PyPI
-does not ship. They take `GNITZ_SERVER_BIN`, else a `gnitz-server` on `PATH`,
-else `../gnitzdb/gnitz-server`, and are skipped when none exists.
+does not ship. `cargo install` builds it from the `gnitz` crate into `.gnitz/`,
+at the version of the client in `uv.lock`; the tests use that binary and no
+other.
 
 ## License
 
