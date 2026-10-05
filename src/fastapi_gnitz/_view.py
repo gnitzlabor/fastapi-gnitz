@@ -12,8 +12,8 @@ _COMPARISONS = ((Gt, "gt", ">"), (Ge, "ge", ">="), (Lt, "lt", "<"), (Le, "le", "
 
 
 class NotNull:
-    """On a view field over a nullable source: keep only the rows where it is
-    not NULL. Without it, declaring such a field non-optional is an error."""
+    """On a view field: keep only the rows where it is not NULL. Without it,
+    declaring a field over a nullable source non-optional is an error."""
 
 
 class Exists[T]:
@@ -162,15 +162,15 @@ def _link_conditions(a: type[Relation], b: type[Relation]) -> list[tuple[str, st
     if is_alias(a) or is_alias(b):
         return []
     return [
-        (link.on(x.__alias__, y.__alias__), x.__alias__, link.name)
+        (link.on(x.__alias__, y.__alias__), x.__alias__, link_name)
         for x, y in ((a, b), (b, a))
-        for link in x.__links__.values()
+        for link_name, link in x.__links__.items()
         if link.target is y
     ]
 
 
 def _field_predicates(view: str, name: str, expr: Expr, column: ColumnType) -> list[str]:
-    found = []
+    found = [f"{expr.sql} IS NOT NULL"] if NotNull in column.metadata else []
     if len(column.literals) == 1:
         found.append(f"{expr.sql} = {render(column.literals[0])}")
     elif column.literals:
@@ -235,13 +235,12 @@ def _select(view: type[View], sources: tuple[Source, ...]) -> str:
                     f"{name}.{field_name}: declared {column.base.__name__}, "
                     f"the source column is {expr.base.__name__}"
                 )
-            if (expr.nullable or missing[expr.alias]) and not column.nullable:
-                if NotNull not in column.metadata:
-                    raise TypeError(
-                        f"{name}.{field_name}: the source is nullable; declare `| None`, "
-                        "or mark the field NotNull to keep only the rows that have it"
-                    )
-                clauses["row"].append(f"{expr.sql} IS NOT NULL")
+            unfiltered = not column.nullable and NotNull not in column.metadata
+            if (expr.nullable or missing[expr.alias]) and unfiltered:
+                raise TypeError(
+                    f"{name}.{field_name}: the source is nullable; declare `| None`, "
+                    "or mark the field NotNull to keep only the rows that have it"
+                )
         clauses[expr.kind] += _field_predicates(name, field_name, expr, column)
         select.append(f"{expr.sql} AS {field_name}")
         if expr.kind == "row":
@@ -251,26 +250,26 @@ def _select(view: type[View], sources: tuple[Source, ...]) -> str:
 
     sql = f"SELECT {', '.join(select)} FROM {_from(joined[0].relation)}"
     by_source_list = set()
-    for position, source in enumerate(joined[1:], 1):
-        relation = source.relation
-        if source.mode == "CROSS JOIN":
+    for source in sources[1:]:
+        relation, how = source
+        if how == "CROSS JOIN":
             sql += f" CROSS JOIN {_from(relation)}"
             continue
-        found = [c for e in joined[:position] for c in _link_conditions(e.relation, relation)]
-        if len(found) > 1:
+        # A join is along a link to a source before it, a semi-join to any.
+        others = joined[: joined.index(source)] if source in joined else joined
+        found = [c for e in others for c in _link_conditions(e.relation, relation)]
+        if len(found) != 1:
             raise TypeError(
-                f"{name}: {len(found)} links relate {relation.__name__} to the other sources; "
-                "read it through the link you mean instead"
-            )
-        if not found:
-            raise TypeError(
-                f"{name}: nothing relates {relation.__name__} to the other sources; add a link, "
+                f"{name}: {len(found)} links relate {relation.__name__} to the other sources, "
+                f"where {how} needs exactly one; read it through the link you mean, "
                 f"or say Cross[{relation.__name__}] and relate it in __where__"
             )
         on, alias, link = found[0]
+        if source not in joined:
+            clauses["row"].append(f"{how} (SELECT 1 FROM {_from(relation)} WHERE {on})")
+            continue
         by_source_list.add((alias, link))
-        how = source.mode
-        if position == 1 and joined[0].mode == "LEFT JOIN":  # the first source is optional
+        if source is joined[1] and joined[0].mode == "LEFT JOIN":  # the first source is optional
             how = "FULL JOIN" if how == "LEFT JOIN" else "RIGHT JOIN"
         sql += f" {how} {_from(relation)} ON {on}"
     for alias, join in paths.items():
@@ -280,19 +279,6 @@ def _select(view: type[View], sources: tuple[Source, ...]) -> str:
                 "also a source; use one of the two"
             )
         sql += f" {'LEFT JOIN' if missing[alias] else 'JOIN'} {join.sql}"
-
-    for source in sources:
-        if source.mode in ("EXISTS", "NOT EXISTS"):
-            relation = source.relation
-            found = [c for e in joined for c in _link_conditions(e.relation, relation)]
-            if len(found) != 1:
-                raise TypeError(
-                    f"{name}: {len(found)} links relate {relation.__name__} to the other sources; "
-                    f"{source.mode} needs exactly one"
-                )
-            clauses["row"].append(
-                f"{source.mode} (SELECT 1 FROM {_from(relation)} WHERE {found[0][0]})"
-            )
 
     if clauses["row"]:
         sql += " WHERE " + " AND ".join(clauses["row"])

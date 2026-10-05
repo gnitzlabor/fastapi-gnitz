@@ -8,10 +8,10 @@ from typing import Annotated, Literal
 import gnitz
 import pytest
 from _shop import Customer, Employee, Money, Peer, Sale, Transfer, load
-from annotated_types import Interval, Len, MultipleOf
+from annotated_types import Len, MultipleOf
 from pydantic import ValidationError
 
-from fastapi_gnitz import Exists, PrimaryKey, Table, View, count, ddl, link, sql, sum_
+from fastapi_gnitz import Exists, PrimaryKey, Table, View, count, ddl, link, sum_
 
 # -- tables --------------------------------------------------------------------
 
@@ -206,7 +206,7 @@ def test_bare_field_must_be_one_source_column():
 
 
 def test_sources_must_be_related():
-    with refused("nothing relates Employee to the other sources"):
+    with refused("0 links relate Employee to the other sources"):
 
         class Unrelated(View[Customer, Employee]):
             cid: int = Customer.id
@@ -245,25 +245,10 @@ def test_a_constraint_with_no_filter_is_refused():
         class Even(View[Sale]):
             qty: Annotated[int, MultipleOf(2)]
 
-
-def test_a_group_of_constraints_is_its_members():
-    class Mid(View[Sale]):
-        id: Annotated[int, Interval(gt=1, lt=5)]
-
-    assert Mid.__sql__ == "SELECT sale.id AS id FROM sale WHERE sale.id > 1 AND sale.id < 5"
-
     with refused("is no filter this can generate"):
 
         class Short(View[Customer]):
             name: Annotated[str, Len(1, 3)]
-
-
-def test_a_fragment_says_its_kind():
-    class Average(View[Sale]):
-        customer_id: int
-        mean: Decimal = sql("AVG({})", Sale.total, kind="aggregate")
-
-    assert Average.__sql__.endswith("FROM sale GROUP BY sale.customer_id")
 
 
 def test_a_view_defines_only_the_inline_views_it_reads():

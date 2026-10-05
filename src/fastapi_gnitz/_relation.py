@@ -40,13 +40,8 @@ class PrimaryKey:
 class Link:
     """What `link()` returns at runtime."""
 
-    name: str
-
     def __init__(self, target: Any, via: str):
         self._target, self.via = target, via
-
-    def __set_name__(self, owner: type, name: str) -> None:
-        self.name = name
 
     @property
     def target(self) -> type[Relation]:
@@ -205,9 +200,9 @@ def declare(cls: type[Relation]) -> None:
     cls.__links__ = cls.__links__ | {k: v for k, v in vars(cls).items() if isinstance(v, Link)}
     for name in (*cls.__columns__, *cls.__links__):
         setattr(cls, name, OffTheClass(name))
-    for link_ in cls.__links__.values():
+    for name, link_ in cls.__links__.items():
         if link_.via not in cls.__columns__:
-            raise TypeError(f"{cls.__name__}.{link_.name}: via={link_.via!r} names no column")
+            raise TypeError(f"{cls.__name__}.{name}: via={link_.via!r} names no column")
 
 
 def is_alias(relation: type[Relation]) -> bool:
@@ -271,12 +266,12 @@ def create_table(table: type[Relation]) -> str:
         null = "" if column.nullable else " NOT NULL"
         parts.append(f"{name} {_sql_type(table, name, column)}{null}")
     parts.append(f"PRIMARY KEY ({', '.join(keys)})")
-    for link_ in table.__links__.values():
+    for link_name, link_ in table.__links__.items():
         target, key = link_.target, link_.key
         mine, theirs = table.__columns__[link_.via].base, target.__columns__[key].base
         if mine is not theirs:
             raise TypeError(
-                f"{table.__name__}.{link_.name}: {link_.via} is {mine.__name__}, "
+                f"{table.__name__}.{link_name}: {link_.via} is {mine.__name__}, "
                 f"{target.__name__}.{key} is {theirs.__name__}"
             )
         parts.append(f"FOREIGN KEY ({link_.via}) REFERENCES {target.__relation__}({key})")

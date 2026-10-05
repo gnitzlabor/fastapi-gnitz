@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 import pytest
 from _shop import Customer, Employee, Peer, Refund, Sale, Transfer, load
-from annotated_types import Ge, Gt, Le, Lt
+from annotated_types import Ge, Gt, Interval, Le, Lt
 
 from fastapi_gnitz import (
     Cross,
@@ -73,6 +73,32 @@ def not_null_marker():
         tier: Annotated[int, NotNull]
 
     return Tiered
+
+
+@case("SELECT id, tier + 1 AS next FROM customer WHERE tier + 1 IS NOT NULL")
+def not_null_marker_on_an_expression():
+    class Promoted(View[Customer]):
+        id: int
+        next: Annotated[int, NotNull] = sql("{} + 1", Customer.tier)
+
+    return Promoted
+
+
+@case("SELECT id FROM sale WHERE id > 1 AND id < 5")
+def a_group_of_constraints_is_its_members():
+    class Mid(View[Sale]):
+        id: Annotated[int, Interval(gt=1, lt=5)]
+
+    return Mid
+
+
+@case("SELECT customer_id, AVG(total) AS mean FROM sale GROUP BY customer_id")
+def a_fragment_says_its_kind():
+    class Average(View[Sale]):
+        customer_id: int
+        mean: Decimal = sql("AVG({})", Sale.total, kind="aggregate")
+
+    return Average
 
 
 @case("SELECT id, tier FROM customer WHERE tier IS NULL OR tier > 1")
