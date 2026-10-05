@@ -36,19 +36,20 @@ class Expr:
 
     kind: Kind
 
-    def __init__(self, sql: str, *parts: object, kind: Kind = "row"):
-        exprs = [p for p in parts if isinstance(p, Expr)]
-        self.sql = sql
+    def __init__(self, template: str, *args: object, kind: Kind = "row"):
+        """`template`, each `{}` filled with an expression or a literal."""
+        exprs = [a for a in args if isinstance(a, Expr)]
+        self.sql = template.format(*map(render, args))
         kinds: list[Kind] = [kind, *(p.kind for p in exprs)]
         self.kind = max(kinds, key=KINDS.index)
         # The aliases it reads: a source of the view, or what a join brings in.
         self.reads: dict[str, Join | None] = {a: j for p in exprs for a, j in p.reads.items()}
 
     def _binary(self, op: str, other: object) -> Expr:
-        return Expr(f"({self.sql} {op} {render(other)})", self, other)
+        return Expr(f"({{}} {op} {{}})", self, other)
 
     def _reflected(self, op: str, other: object) -> Expr:
-        return Expr(f"({render(other)} {op} {self.sql})", self, other)
+        return Expr(f"({{}} {op} {{}})", other, self)
 
     def __eq__(self, other: object) -> Expr:  # type: ignore[override]
         return self._binary("=", other)
@@ -99,10 +100,10 @@ class Expr:
         return self._binary("OR", other)
 
     def __invert__(self) -> Expr:
-        return Expr(f"(NOT {self.sql})", self)
+        return Expr("(NOT {})", self)
 
     def __neg__(self) -> Expr:
-        return Expr(f"(-{self.sql})", self)
+        return Expr("(-{})", self)
 
     def __bool__(self) -> bool:
         raise TypeError(f"{self.sql} is a SQL expression; combine conditions with & | ~")
@@ -150,8 +151,16 @@ def _expr(value: object) -> Expr:
     return value
 
 
-def _sql(template: str, *args: object, kind: Kind = "row") -> Any:
-    return Expr(template.format(*(render(a) for a in args)), *args, kind=kind)
+def sql(template: str, *args: object, kind: Kind = "row") -> Any:
+    """A SQL fragment this module has no function for, each `{}` filled with an
+    expression or a literal::
+
+        bucket: str = sql("CASE WHEN {} > 100 THEN 'big' ELSE 'small' END", Sale.total)
+
+    `kind` says what the fragment is where its arguments do not:
+    `sql("AVG({})", Sale.total, kind="aggregate")`.
+    """
+    return Expr(template, *args, kind=kind)
 
 
 _STAR: Any = object()
@@ -160,37 +169,37 @@ _STAR: Any = object()
 def count(expr: object = _STAR) -> int:
     """`COUNT(*)`, or `COUNT(expr)`: the rows where `expr` is not NULL."""
     if expr is _STAR:
-        return _sql("COUNT(*)", kind="aggregate")
-    return _sql("COUNT({})", _expr(expr), kind="aggregate")
+        return sql("COUNT(*)", kind="aggregate")
+    return sql("COUNT({})", _expr(expr), kind="aggregate")
 
 
 def count_distinct(expr: object) -> int:
-    return _sql("COUNT(DISTINCT {})", _expr(expr), kind="aggregate")
+    return sql("COUNT(DISTINCT {})", _expr(expr), kind="aggregate")
 
 
 def sum_[T](expr: T) -> T:
-    return _sql("SUM({})", _expr(expr), kind="aggregate")
+    return sql("SUM({})", _expr(expr), kind="aggregate")
 
 
 def min_[T](expr: T) -> T:
-    return _sql("MIN({})", _expr(expr), kind="aggregate")
+    return sql("MIN({})", _expr(expr), kind="aggregate")
 
 
 def max_[T](expr: T) -> T:
-    return _sql("MAX({})", _expr(expr), kind="aggregate")
+    return sql("MAX({})", _expr(expr), kind="aggregate")
 
 
 def coalesce[T](expr: T | None, default: T) -> T:
-    return _sql("COALESCE({}, {})", _expr(expr), default)
+    return sql("COALESCE({}, {})", _expr(expr), default)
 
 
 def is_null(expr: object) -> bool:
-    return _sql("({} IS NULL)", _expr(expr))
+    return sql("({} IS NULL)", _expr(expr))
 
 
 def desc[T](expr: T) -> T:
     """Descending, in a window's `order_by`."""
-    return _sql("{} DESC", _expr(expr))
+    return sql("{} DESC", _expr(expr))
 
 
 def row_number(*, partition_by: Sequence[object] = (), order_by: Sequence[object] = ()) -> int:
@@ -200,13 +209,4 @@ def row_number(*, partition_by: Sequence[object] = (), order_by: Sequence[object
         if exprs
     ]
     exprs = (_expr(e) for e in (*partition_by, *order_by))
-    return _sql(f"ROW_NUMBER() OVER ({' '.join(over)})", *exprs, kind="window")
-
-
-def sql(template: str, *args: object) -> Any:
-    """A SQL fragment this module has no function for, each `{}` filled with an
-    expression or a literal::
-
-        bucket: str = sql("CASE WHEN {} > 100 THEN 'big' ELSE 'small' END", Sale.total)
-    """
-    return _sql(template, *args)
+    return sql(f"ROW_NUMBER() OVER ({' '.join(over)})", *exprs, kind="window")

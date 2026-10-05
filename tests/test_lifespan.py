@@ -1,17 +1,15 @@
-import gnitz
 import httpx
 from fastapi import FastAPI
 
 from fastapi_gnitz import Connection, lifespan
 
 
-async def test_endpoint_reads_through_the_app_connection(server):
-    with gnitz.connect(server) as client:
-        client.execute_sql(
-            "CREATE TABLE items (id BIGINT NOT NULL PRIMARY KEY, qty BIGINT NOT NULL); "
-            "INSERT INTO items VALUES (1, 10), (2, 20)"
-        )
-        table_id, schema = client.resolve_table("items")
+async def test_endpoint_reads_through_the_app_connection(server, client):
+    client.execute_sql(
+        "CREATE TABLE items (id BIGINT NOT NULL PRIMARY KEY, qty BIGINT NOT NULL); "
+        "INSERT INTO items VALUES (1, 10), (2, 20)"
+    )
+    table_id, schema = client.resolve_table("items")
 
     app = FastAPI(lifespan=lifespan(server))
 

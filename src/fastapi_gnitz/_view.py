@@ -6,16 +6,14 @@ from typing import Any, ClassVar, Literal, NamedTuple, get_args, get_origin
 from annotated_types import Ge, Gt, Le, Lt, MaxLen, MinLen, MultipleOf, Predicate
 
 from fastapi_gnitz._expr import KINDS, Column, Expr, Kind, render
-from fastapi_gnitz._relation import (
-    ColumnType,
-    NotNull,
-    Relation,
-    create_table,
-    declare,
-    is_alias,
-)
+from fastapi_gnitz._relation import ColumnType, Relation, create_table, declare, is_alias
 
 _COMPARISONS = ((Gt, "gt", ">"), (Ge, "ge", ">="), (Lt, "lt", "<"), (Le, "le", "<="))
+
+
+class NotNull:
+    """On a view field over a nullable source: keep only the rows where it is
+    not NULL. Without it, declaring such a field non-optional is an error."""
 
 
 class Exists[T]:
@@ -31,7 +29,7 @@ class Cross[T]:
 
 
 # How a source takes part in the view, as the SQL that says so.
-type Mode = Literal["JOIN", "LEFT JOIN", "CROSS JOIN", "EXISTS", "NOT EXISTS", "UNION ALL"]
+type Mode = Literal["JOIN", "LEFT JOIN", "CROSS JOIN", "EXISTS", "NOT EXISTS"]
 
 _MODES: dict[Any, Mode] = {Exists: "EXISTS", NotExists: "NOT EXISTS", Cross: "CROSS JOIN"}
 
@@ -41,19 +39,25 @@ class Source(NamedTuple):
     mode: Mode
 
 
-def _sources(item: Any) -> list[Source]:
-    """The sources one item of `View[...]` names: one, or each member of a union."""
+def _branches(items: tuple[Any, ...]) -> tuple[tuple[Source, ...], ...]:
+    """The sources of each SELECT of `View[*items]`: of one, or of one per member of a union."""
+    if len(items) == 1 and isinstance(items[0], UnionType) and NoneType not in get_args(items[0]):
+        return tuple((Source(_relation(member), "JOIN"),) for member in get_args(items[0]))
+    return (tuple(_source(item) for item in items),)
+
+
+def _source(item: Any) -> Source:
     origin = get_origin(item)
     if origin in _MODES:
-        return [Source(_relation(get_args(item)[0]), _MODES[origin])]
+        return Source(_relation(get_args(item)[0]), _MODES[origin])
     if isinstance(item, UnionType):
         members = [a for a in get_args(item) if a is not NoneType]
         if len(members) == len(get_args(item)):
-            return [Source(_relation(m), "UNION ALL") for m in members]
+            raise TypeError(f"{item}: a union is a view's only source")
         if len(members) != 1:
             raise TypeError(f"{item}: an optional source is one relation `| None`")
-        return [Source(_relation(members[0]), "LEFT JOIN")]
-    return [Source(_relation(item), "JOIN")]
+        return Source(_relation(members[0]), "LEFT JOIN")
+    return Source(_relation(item), "JOIN")
 
 
 def _relation(item: Any) -> type[Relation]:
@@ -74,8 +78,8 @@ class View[*Sources](Relation):
     **Sources.** `View[A]` reads one relation. `View[A, B]` joins `B` along the
     link between them, `View[A, B | None]` as a LEFT JOIN; `Exists[B]` and
     `NotExists[B]` keep the rows of `A` with and without a linked `B`;
-    `Cross[B]` pairs every row with every `B`. Two sources no link relates are
-    joined by a `__where__` that names both. `View[A | B]` is `A UNION ALL B`.
+    `Cross[B]` pairs every row with every `B`, for a `__where__` to relate
+    them by. `View[A | B]` is `A UNION ALL B`.
 
     **Fields.** A bare field is the source column of that name; a field given a
     value is defined by that expression. Once a field is an aggregate, the
@@ -91,7 +95,8 @@ class View[*Sources](Relation):
     what none of this expresses.
     """
 
-    __sources__: ClassVar[tuple[Source, ...]] = ()
+    __sources__: ClassVar[tuple[tuple[Source, ...], ...]] = ()
+    """The sources of each SELECT: of the one, or of each member of a union."""
     __where__: ClassVar[Any] = None
     __inline__: ClassVar[bool] = False
     __sql__: ClassVar[str]
@@ -105,7 +110,7 @@ class View[*Sources](Relation):
         super().__pydantic_init_subclass__(**kwargs)
         for base in get_original_bases(cls):
             if get_origin(base) is View:
-                cls.__sources__ = tuple(s for item in get_args(base) for s in _sources(item))
+                cls.__sources__ = _branches(get_args(base))
         declare(cls)
         if is_alias(cls):
             return
@@ -115,17 +120,23 @@ class View[*Sources](Relation):
             if cls.__sources__ or cls.__definitions__ or cls.__where__ is not None:
                 raise TypeError(f"{cls.__name__}: a view with __sql__ declares only its columns")
             return
-        body = _body(cls)
+        if not any(cls.__sources__):
+            raise TypeError(f"{cls.__name__}: a view reads something: View[Source], or __sql__")
+        if len(cls.__sources__) > 1 and (cls.__definitions__ or cls.__where__ is not None):
+            raise TypeError(
+                f"{cls.__name__}: a union takes its members' columns as they are; "
+                "filter the members"
+            )
+        cls.__sql__ = " UNION ALL ".join(_select(cls, branch) for branch in cls.__sources__)
+        # The inline views it reads, and the ones those read.
         cls.__ctes__ = {}
-        for source in cls.__sources__:
-            if issubclass(source.relation, View):
-                cls.__ctes__.update(source.relation.__ctes__)
-                if source.relation.__inline__:
-                    cls.__ctes__[source.relation.__relation__] = source.relation.__sql__
+        for branch in cls.__sources__:
+            for inline, _ in branch:
+                if issubclass(inline, View) and inline.__inline__:
+                    cls.__ctes__ |= inline.__ctes__ | {inline.__relation__: inline.__sql__}
         if cls.__ctes__ and not cls.__inline__:
             with_ = ", ".join(f"{name} AS ({sql})" for name, sql in cls.__ctes__.items())
-            body = f"WITH {with_} {body}"
-        cls.__sql__ = body
+            cls.__sql__ = f"WITH {with_} {cls.__sql__}"
 
 
 def ddl(relation: type[Relation]) -> str:
@@ -175,22 +186,6 @@ def _field_predicates(view: str, name: str, expr: Expr, column: ColumnType) -> l
                 "so it would not hold of the view's rows; put the condition in __where__"
             )
     return found
-
-
-def _body(view: type[View]) -> str:
-    name = view.__name__
-    sources = view.__sources__
-    if not sources:
-        raise TypeError(f"{name}: a view reads something: View[Source], or __sql__")
-    if all(s.mode != "UNION ALL" for s in sources):
-        return _select(view, sources)
-    if any(s.mode != "UNION ALL" for s in sources):
-        raise TypeError(f"{name}: a union is a view's only source")
-    if view.__definitions__ or view.__where__ is not None:
-        raise TypeError(
-            f"{name}: a union takes its members' columns as they are; filter the members"
-        )
-    return " UNION ALL ".join(_select(view, (Source(s.relation, "JOIN"),)) for s in sources)
 
 
 def _select(view: type[View], sources: tuple[Source, ...]) -> str:
@@ -267,20 +262,17 @@ def _select(view: type[View], sources: tuple[Source, ...]) -> str:
                 f"{name}: {len(found)} links relate {relation.__name__} to the other sources; "
                 "read it through the link you mean instead"
             )
-        if found:
-            on, alias, link = found[0]
-            by_source_list.add((alias, link))
-            how = source.mode
-            if position == 1 and joined[0].mode == "LEFT JOIN":  # the first source is optional
-                how = "FULL JOIN" if how == "LEFT JOIN" else "RIGHT JOIN"
-            sql += f" {how} {_from(relation)} ON {on}"
-        elif where is not None and relation.__alias__ in where.reads and source.mode == "JOIN":
-            sql += f", {_from(relation)}"  # related by __where__
-        else:
+        if not found:
             raise TypeError(
                 f"{name}: nothing relates {relation.__name__} to the other sources; add a link, "
-                f"a __where__ that names it, or say Cross[{relation.__name__}]"
+                f"or say Cross[{relation.__name__}] and relate it in __where__"
             )
+        on, alias, link = found[0]
+        by_source_list.add((alias, link))
+        how = source.mode
+        if position == 1 and joined[0].mode == "LEFT JOIN":  # the first source is optional
+            how = "FULL JOIN" if how == "LEFT JOIN" else "RIGHT JOIN"
+        sql += f" {how} {_from(relation)} ON {on}"
     for alias, join in paths.items():
         if (join.parent, join.link) in by_source_list:
             raise TypeError(
@@ -304,8 +296,7 @@ def _select(view: type[View], sources: tuple[Source, ...]) -> str:
 
     if clauses["row"]:
         sql += " WHERE " + " AND ".join(clauses["row"])
-    grouped = clauses["aggregate"] or any(e.kind == "aggregate" for e in used)
-    if grouped and keys:
+    if keys and any(e.kind == "aggregate" for e in used):
         sql += " GROUP BY " + ", ".join(keys)
     if clauses["aggregate"]:
         sql += " HAVING " + " AND ".join(clauses["aggregate"])

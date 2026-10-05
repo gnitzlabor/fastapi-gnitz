@@ -8,10 +8,10 @@ from typing import Annotated, Literal
 import gnitz
 import pytest
 from _shop import Customer, Employee, Money, Peer, Sale, Transfer, load
-from annotated_types import MultipleOf
+from annotated_types import Interval, Len, MultipleOf
 from pydantic import ValidationError
 
-from fastapi_gnitz import Exists, PrimaryKey, Table, View, count, ddl, link, sum_
+from fastapi_gnitz import Exists, PrimaryKey, Table, View, count, ddl, link, sql, sum_
 
 # -- tables --------------------------------------------------------------------
 
@@ -246,6 +246,42 @@ def test_a_constraint_with_no_filter_is_refused():
             qty: Annotated[int, MultipleOf(2)]
 
 
+def test_a_group_of_constraints_is_its_members():
+    class Mid(View[Sale]):
+        id: Annotated[int, Interval(gt=1, lt=5)]
+
+    assert Mid.__sql__ == "SELECT sale.id AS id FROM sale WHERE sale.id > 1 AND sale.id < 5"
+
+    with refused("is no filter this can generate"):
+
+        class Short(View[Customer]):
+            name: Annotated[str, Len(1, 3)]
+
+
+def test_a_fragment_says_its_kind():
+    class Average(View[Sale]):
+        customer_id: int
+        mean: Decimal = sql("AVG({})", Sale.total, kind="aggregate")
+
+    assert Average.__sql__.endswith("FROM sale GROUP BY sale.customer_id")
+
+
+def test_a_view_defines_only_the_inline_views_it_reads():
+    class Paid(View[Sale]):
+        __inline__ = True
+        id: int
+        status: Literal["paid"]
+
+    class PaidIds(View[Paid]):
+        id: int
+
+    class Count(View[PaidIds]):
+        n: int = count()
+
+    assert PaidIds.__sql__.startswith("WITH paid AS (")
+    assert Count.__sql__ == "SELECT COUNT(*) AS n FROM paid_ids"
+
+
 def test_union_and_handwritten_views_declare_columns_only():
     class Paid(View[Sale]):
         id: int
@@ -265,6 +301,11 @@ def test_union_and_handwritten_views_declare_columns_only():
         class Mismatched(View[Paid | Open]):
             status: Literal["paid"] | None
             id: str
+
+    with refused("a union is a view's only source"):
+
+        class Both(View[Paid | Open, Customer]):
+            id: int = Paid.id
 
     with refused("declares only its columns"):
 

@@ -1,15 +1,16 @@
 """The app's connection to gnitz, held by the lifespan and injected into endpoints."""
 
-from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, FastAPI
 from gnitz import aio
 from starlette.requests import HTTPConnection
+from starlette.types import StatelessLifespan
 
 
-def lifespan(target: str) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
+def lifespan(target: str) -> StatelessLifespan[FastAPI]:
     """A FastAPI lifespan that holds one `gnitz.aio` connection to `target` for
     the life of the app.
 
@@ -26,7 +27,7 @@ def lifespan(target: str) -> Callable[[FastAPI], AbstractAsyncContextManager[Non
     return _lifespan
 
 
-def get_connection(http: HTTPConnection) -> aio.AsyncConnection:
+async def get_connection(http: HTTPConnection) -> aio.AsyncConnection:
     """The app's gnitz connection, for an HTTP or a WebSocket endpoint."""
     return http.app.state.gnitz
 

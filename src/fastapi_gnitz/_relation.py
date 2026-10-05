@@ -11,9 +11,10 @@ from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
 from types import NoneType, UnionType
-from typing import Any, ClassVar, Literal, NamedTuple, get_args, get_origin, overload
+from typing import Any, ClassVar, Literal, NamedTuple, get_args, get_origin
 from uuid import UUID
 
+from annotated_types import GroupedMetadata
 from pydantic import BaseModel, ConfigDict
 from pydantic.fields import FieldInfo
 
@@ -34,11 +35,6 @@ _SQL_TYPES: dict[type, str] = {
 
 class PrimaryKey:
     """Marks a key column: `id: Annotated[int, PrimaryKey]`."""
-
-
-class NotNull:
-    """On a view field over a nullable source: keep only the rows where it is
-    not NULL. Without it, declaring such a field non-optional is an error."""
 
 
 class Link:
@@ -72,20 +68,8 @@ class Link:
         """The join condition, between an alias of the link's owner and one of its target."""
         return f"{owner}.{self.via} = {target}.{self.key}"
 
-    def __get__(self, row: object, owner: type[Relation]) -> Path:
-        if row is not None:
-            raise AttributeError(
-                f"{owner.__name__}.{self.name} is a path for view definitions; "
-                "a row holds no related rows"
-            )
-        return Path(owner, owner.__alias__, self, {owner.__alias__: None})
 
-
-@overload
-def link[T](target: type[T], *, via: str) -> T: ...
-@overload
-def link[T](target: Callable[[], type[T]], *, via: str) -> T: ...
-def link(target: Any, *, via: str) -> Any:
+def link[T](target: type[T] | Callable[[], type[T]], *, via: str) -> T:
     """A to-one relationship: the column `via` references `target`'s primary key.
 
     It declares the foreign key, and it is a path in view definitions, joined
@@ -101,30 +85,27 @@ def link(target: Any, *, via: str) -> Any:
     A nullable `via` is a LEFT JOIN, so what is read through it is optional. A
     table that references itself names itself lazily: `link(lambda: Employee, ...)`.
     """
-    return Link(target, via)
+    return Link(target, via)  # type: ignore[return-value]
 
 
 class Path:
-    """One hop through a link: the target's columns, under an alias of their own."""
+    """A relation under an alias: its columns, and each link as the path one hop on."""
 
-    def __init__(
-        self, owner: type[Relation], parent: str, link: Link, reads: dict[str, Join | None]
-    ):
-        target = link.target
-        alias = f"{parent}__{link.name}"
-        sql = f"{target.__relation__} {alias} ON {link.on(parent, alias)}"
-        join = Join(parent, link.name, sql, owner.__columns__[link.via].nullable)
-        self._target, self._alias, self._reads = target, alias, {**reads, alias: join}
+    def __init__(self, relation: type[Relation], alias: str, reads: dict[str, Join | None]):
+        self._relation, self._alias, self._reads = relation, alias, reads
 
     def __getattr__(self, name: str) -> Any:
-        target = self._target
-        column = target.__columns__.get(name)
+        relation, alias = self._relation, self._alias
+        column = relation.__columns__.get(name)
         if column is not None:
-            return Column(self._alias, name, column.base, column.nullable, self._reads)
-        link = target.__links__.get(name)
-        if link is not None:
-            return Path(target, self._alias, link, self._reads)
-        raise AttributeError(f"{target.__name__} has no column or link {name!r}")
+            return Column(alias, name, column.base, column.nullable, self._reads)
+        link = relation.__links__.get(name)
+        if link is None:
+            raise AttributeError(f"{relation.__name__} has no column or link {name!r}")
+        target, hop = link.target, f"{alias}__{name}"
+        sql = f"{target.__relation__} {hop} ON {link.on(alias, hop)}"
+        join = Join(alias, name, sql, relation.__columns__[link.via].nullable)
+        return Path(target, hop, {**self._reads, hop: join})
 
 
 class ColumnType(NamedTuple):
@@ -155,23 +136,28 @@ def column_type(field: FieldInfo) -> ColumnType:
         if len(kinds) != 1:
             raise TypeError(f"{annotation} mixes types")
         annotation = kinds.pop()
-    return ColumnType(annotation, nullable, literals, metadata)
+    # A group stands for its members: `Interval(gt=1, lt=5)` for a `Gt` and an `Lt`.
+    flat = [m for item in metadata for m in (item if isinstance(item, GroupedMetadata) else [item])]
+    return ColumnType(annotation, nullable, literals, flat)
 
 
-class ColumnOf:
-    """Makes `Sale.total` the field's column. On a row, the field's value shadows it."""
+class OffTheClass:
+    """Makes `Sale.total` the field's column and `Sale.customer` the link's path.
+    On a row, a field's value shadows it."""
 
     def __init__(self, name: str):
         self.name = name
 
-    def __get__(self, row: object, owner: type[Relation]) -> Column:
+    def __get__(self, row: object, owner: type[Relation]) -> Any:
         # A class still being defined has no columns of its own: Pydantic,
         # collecting its fields, must not take an inherited column for a default.
-        column = vars(owner).get("__columns__", {}).get(self.name)
-        if row is not None or column is None:
-            raise AttributeError(self.name)
+        if row is not None or "__columns__" not in vars(owner):
+            raise AttributeError(
+                f"{owner.__name__}.{self.name} is read off the class, in view definitions; "
+                "a row holds no related rows"
+            )
         alias = owner.__alias__
-        return Column(alias, self.name, column.base, column.nullable, {alias: None})
+        return getattr(Path(owner, alias, {alias: None}), self.name)
 
 
 class Relation(BaseModel):
@@ -188,7 +174,6 @@ class Relation(BaseModel):
     __definitions__: ClassVar[dict[str, Expr]]
     """The expressions that fields were defined by: `spent: Decimal = sum_(...)`."""
 
-    @classmethod
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         # Before Pydantic collects the fields, or it would take a definition for a default.
@@ -217,9 +202,9 @@ def declare(cls: type[Relation]) -> None:
         if not _IDENTIFIER.match(what) or "__" in what:
             raise TypeError(f"{cls.__name__}: {what!r} is not a usable relation name")
     cls.__columns__ = {name: column_type(field) for name, field in cls.model_fields.items()}
-    for name in cls.__columns__:
-        setattr(cls, name, ColumnOf(name))
     cls.__links__ = cls.__links__ | {k: v for k, v in vars(cls).items() if isinstance(v, Link)}
+    for name in (*cls.__columns__, *cls.__links__):
+        setattr(cls, name, OffTheClass(name))
     for link_ in cls.__links__.values():
         if link_.via not in cls.__columns__:
             raise TypeError(f"{cls.__name__}.{link_.name}: via={link_.via!r} names no column")

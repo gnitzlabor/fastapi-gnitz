@@ -362,7 +362,7 @@ def three_sources():
 
 @case("SELECT c.id AS cid, e.id AS eid FROM customer c JOIN employee e ON c.name = e.name")
 def unlinked_sources_related_by_where():
-    class Staff(View[Customer, Employee]):
+    class Staff(View[Customer, Cross[Employee]]):
         __where__ = Customer.name == Employee.name
         cid: int = Customer.id
         eid: int = Employee.id
@@ -372,7 +372,7 @@ def unlinked_sources_related_by_where():
 
 @case("SELECT e.id AS lo, p.id AS hi FROM employee e, employee p WHERE e.sal < p.sal")
 def alias_pairs_a_table_with_itself():
-    class PayGap(View[Employee, Peer]):
+    class PayGap(View[Employee, Cross[Peer]]):
         __where__ = Employee.sal < Peer.sal
         lo: int = Employee.id
         hi: int = Peer.id
