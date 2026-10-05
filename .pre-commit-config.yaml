@@ -1,0 +1,22 @@
+# The hooks run the tools of the project's environment, so `uv.lock` pins their versions.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: ty
+        name: ty check
+        entry: uv run ty check
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false

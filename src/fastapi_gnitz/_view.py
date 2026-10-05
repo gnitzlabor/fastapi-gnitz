@@ -102,8 +102,8 @@ class View[*Sources](Relation):
     __sql__: ClassVar[str]
     __ctes__: ClassVar[dict[str, str]] = {}
 
-    def __class_getitem__(cls, item: Any) -> Any:
-        return GenericAlias(cls, item)
+    def __class_getitem__(cls, typevar_values: Any) -> Any:
+        return GenericAlias(cls, typevar_values)
 
     @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:

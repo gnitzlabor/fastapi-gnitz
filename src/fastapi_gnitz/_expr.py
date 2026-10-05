@@ -51,10 +51,10 @@ class Expr:
     def _reflected(self, op: str, other: object) -> Expr:
         return Expr(f"({{}} {op} {{}})", other, self)
 
-    def __eq__(self, other: object) -> Expr:  # type: ignore[override]
+    def __eq__(self, other: object) -> Expr:  # ty: ignore[invalid-method-override]
         return self._binary("=", other)
 
-    def __ne__(self, other: object) -> Expr:  # type: ignore[override]
+    def __ne__(self, other: object) -> Expr:  # ty: ignore[invalid-method-override]
         return self._binary("<>", other)
 
     def __lt__(self, other: object) -> Expr:

@@ -79,7 +79,7 @@ def not_null_marker():
 def where_takes_any_condition():
     class Untiered(View[Customer]):
         # A type checker sees the column as its value, so it objects to ordering an optional one.
-        __where__ = is_null(Customer.tier) | (Customer.tier > 1)  # pyright: ignore[reportOptionalOperand]
+        __where__ = is_null(Customer.tier) | (Customer.tier > 1)  # ty: ignore[unsupported-operator]  # pyright: ignore[reportOptionalOperand]
         id: int
         tier: int | None
 

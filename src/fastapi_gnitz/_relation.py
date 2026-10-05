@@ -85,7 +85,7 @@ def link[T](target: type[T] | Callable[[], type[T]], *, via: str) -> T:
     A nullable `via` is a LEFT JOIN, so what is read through it is optional. A
     table that references itself names itself lazily: `link(lambda: Employee, ...)`.
     """
-    return Link(target, via)  # type: ignore[return-value]
+    return Link(target, via)  # ty: ignore[invalid-return-type]
 
 
 class Path:
@@ -138,7 +138,7 @@ def column_type(field: FieldInfo) -> ColumnType:
         annotation = kinds.pop()
     # A group stands for its members: `Interval(gt=1, lt=5)` for a `Gt` and an `Lt`.
     flat = [m for item in metadata for m in (item if isinstance(item, GroupedMetadata) else [item])]
-    return ColumnType(annotation, nullable, literals, flat)
+    return ColumnType(annotation, nullable, literals, flat)  # ty: ignore[invalid-argument-type]
 
 
 class OffTheClass:

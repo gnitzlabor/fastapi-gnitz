@@ -99,7 +99,12 @@ to it yet: creating the relations and reading them as models is still by hand.
 uv sync
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
+uv run ty check
+uv run pre-commit install
 ```
+
+The pre-commit hook runs `ruff check --fix`, `ruff format` and `ty check`, each
+at the version `uv.lock` pins.
 
 The tests run against a real `gnitz-server`, which the `gnitz` package on PyPI
 does not ship. They take `GNITZ_SERVER_BIN`, else a `gnitz-server` on `PATH`,
