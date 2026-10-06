@@ -8,9 +8,10 @@ from fastapi_gnitz import Db, lifespan
 
 
 def test_endpoints_read_and_write_through_the_apps_database(server, client, tmp_path):
-    relations = [Customer, Sale, Spend]
     app = FastAPI(
-        lifespan=lifespan(server, schema=client.schema, create=relations, mirror=tmp_path)
+        lifespan=lifespan(
+            server, schema=client.schema, create=[Customer, Sale, Spend], mirror=(tmp_path, Spend)
+        )
     )
 
     @app.post("/customers", status_code=201)

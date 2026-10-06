@@ -19,14 +19,14 @@ def lifespan(
     *,
     schema: str = "public",
     create: Sequence[type[Relation]] = (),
-    mirror: str | os.PathLike[str] | None = None,
+    mirror: tuple[str | os.PathLike[str], *tuple[type[View], ...]] | None = None,
 ) -> StatelessLifespan[FastAPI]:
     """A FastAPI lifespan that holds one `Database` on `target` for the life of
     the app, and creates the relations in `create` when the app starts, as
     `Database.create` does.
 
-    Given the directory `mirror`, it holds a copy there of each view in `create`
-    that declares `__delta__`, as `Database.mirror` does.
+    `mirror` is a directory and the views to hold a copy of in it, as
+    `Database.mirror` takes them: `mirror=("/var/lib/app/mirror", CustomerStats)`.
 
     The database is opened inside the lifespan, so it is bound to the loop
     that serves the app's requests — a `gnitz.aio` connection works on no other.
@@ -37,8 +37,7 @@ def lifespan(
         async with Database(target, schema=schema) as db:
             await db.create(*create)
             if mirror is not None:
-                copied = (v for v in create if issubclass(v, View) and v.__delta__ is not None)
-                await db.mirror(mirror, *copied)
+                await db.mirror(*mirror)
             app.state.gnitz = db
             yield
 

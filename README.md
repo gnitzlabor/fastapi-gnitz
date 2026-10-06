@@ -146,7 +146,7 @@ app = FastAPI(
     lifespan=lifespan(
         "/var/run/gnitz.sock",
         create=[Customer, Sale, CustomerStats],
-        mirror="/var/lib/app/mirror",
+        mirror=("/var/lib/app/mirror", CustomerStats),
     )
 )
 
@@ -171,9 +171,10 @@ async def stats(db: Db) -> list[CustomerStats]:
 
 `lifespan(target, create=[...])` holds one `Database` for the life of the app
 and creates the relations when it starts; `Db` injects it into an endpoint.
-Given `mirror`, it keeps a copy of each created view that declares `__delta__`,
-so `GET /stats` is answered without a request to gnitz. A table is the request
-body it validates, a view the response it documents.
+`mirror` is what `Database.mirror` takes, the directory and then the views: with
+a copy of `CustomerStats`, `GET /stats` is answered without a request to
+gnitz. A table is the request body it validates, a view the response it
+documents.
 
 ### Following a view
 
