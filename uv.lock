@@ -102,7 +102,7 @@ dev = [
 requires-dist = [
     { name = "annotated-types", specifier = ">=0.7" },
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "gnitz", specifier = ">=0.1.3" },
+    { name = "gnitz", specifier = ">=0.1.4" },
     { name = "pydantic", specifier = ">=2.11" },
 ]
 
@@ -127,11 +127,11 @@ wheels = [
 
 [[package]]
 name = "gnitz"
-version = "0.1.3"
+version = "0.1.4"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/cb/b8/f941f8b1a519b541b503ee2131c444935239c6b044446e8ef42e336e8d84/gnitz-0.1.3.tar.gz", hash = "sha256:60acb1f7e83254a9d4cf8c6c1a92c5c50cc43c8c09a1dd6678f024f746ec74c2", size = 1569187, upload-time = "2026-10-06T10:11:35.604Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/82/d4/db2e1e500b688439b531018d577e837f69bc68026883603db732c8ebf24d/gnitz-0.1.4.tar.gz", hash = "sha256:f6f50d5db3e30a4533831ca654f60f66ae5d52f135f9ff82ee04a86ac8b1da22", size = 1579053, upload-time = "2026-10-06T12:28:23.797Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fa/f1/bf462117dcdacda8bbe60ea81b620232700fed26936bd0e22e7ee631150b/gnitz-0.1.3-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:7570a491ac699219a8884ee862dbdbe54e28d684f4811adf46aec28c8ccd1932", size = 3937837, upload-time = "2026-10-06T10:11:32.881Z" },
+    { url = "https://files.pythonhosted.org/packages/cf/42/b86854d8220a3ef76794bef227387980f83537e699e45b2f2fcf8acb2152/gnitz-0.1.4-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:ad8963aa50e45725d93ab5480940d483fdad694adc97f83275cfb4aa4d2b5e8e", size = 3947356, upload-time = "2026-10-06T12:28:21.372Z" },
 ]
 
 [[package]]

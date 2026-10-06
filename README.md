@@ -115,13 +115,40 @@ async with Database("/var/run/gnitz.sock") as db:
   discards it. No other request's writes are taken in.
 - **`client`** is the `gnitz` connection underneath, for anything else.
 
+### Reading a view from a local copy
+
+A view that declares `__delta__` keeps that much of its changes on the server,
+and with them a `Database` keeps a copy of the view on local disk:
+
+```python
+class CustomerStats(View[Sale]):
+    __delta__ = "64MB"
+    ...
+
+
+await db.mirror("/var/lib/app/mirror", CustomerStats)
+stats = await db.all(CustomerStats)  # asks the server nothing
+```
+
+`all` and `get` then read the copy. It follows the server's view: a commit
+that changes the view is in the copy a moment later, so a read just after a
+write may not show it yet. Tables, and views without a copy, are read from the
+server. The directory belongs to one process, and holds the copies from one run
+to the next.
+
 ## In an app
 
 ```python
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi_gnitz import Db, lifespan
 
-app = FastAPI(lifespan=lifespan("/var/run/gnitz.sock", create=[Customer, Sale, CustomerStats]))
+app = FastAPI(
+    lifespan=lifespan(
+        "/var/run/gnitz.sock",
+        create=[Customer, Sale, CustomerStats],
+        mirror="/var/lib/app/mirror",
+    )
+)
 
 
 @app.post("/sales", status_code=201)
@@ -144,24 +171,20 @@ async def stats(db: Db) -> list[CustomerStats]:
 
 `lifespan(target, create=[...])` holds one `Database` for the life of the app
 and creates the relations when it starts; `Db` injects it into an endpoint.
-A table is the request body it validates, a view the response it documents.
+Given `mirror`, it keeps a copy of each created view that declares `__delta__`,
+so `GET /stats` is answered without a request to gnitz. A table is the request
+body it validates, a view the response it documents.
 
 ### Following a view
 
-A view that declares `__delta__` keeps that much of its changes on the server,
-and `changes` reads them: first the view's rows, then what was added and
-removed whenever it changed.
+`changes` reads a view's changes as they are committed: first the view's rows,
+then what was added and removed whenever it changed.
 
 ```python
-class CustomerStats(View[Sale]):
-    __delta__ = "64MB"
-    ...
-
-
 @app.websocket("/stats")
 async def follow_stats(socket: WebSocket, db: Db):
     await socket.accept()
-    async for delta in db.changes(CustomerStats, every=0.5):
+    async for delta in db.changes(CustomerStats):
         await socket.send_json(
             {
                 "reset": delta.reset,
@@ -173,13 +196,14 @@ async def follow_stats(socket: WebSocket, db: Db):
 
 A `Delta` with `reset` set holds the view's whole value in `added`: the first
 one does, and so does one that follows a gap gnitz no longer holds the changes
-for. gnitz does not push changes, so `changes` asks for them `every` seconds.
+for. The view declares `__delta__`. gnitz holds the request until the view
+changes, so each `changes` has a connection of its own while it is iterated.
 
 ## Development
 
 ```bash
 uv sync
-cargo install gnitz@0.1.3 --locked --root .gnitz
+cargo install gnitz@0.1.4 --locked --root .gnitz
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
 uv run ty check

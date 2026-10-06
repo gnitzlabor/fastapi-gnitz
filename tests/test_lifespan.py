@@ -1,3 +1,5 @@
+import time
+
 from _shop import Customer, Sale, Spend
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.testclient import TestClient
@@ -5,8 +7,11 @@ from fastapi.testclient import TestClient
 from fastapi_gnitz import Db, lifespan
 
 
-def test_endpoints_read_and_write_through_the_apps_database(server, client):
-    app = FastAPI(lifespan=lifespan(server, schema=client.schema, create=[Customer, Sale, Spend]))
+def test_endpoints_read_and_write_through_the_apps_database(server, client, tmp_path):
+    relations = [Customer, Sale, Spend]
+    app = FastAPI(
+        lifespan=lifespan(server, schema=client.schema, create=relations, mirror=tmp_path)
+    )
 
     @app.post("/customers", status_code=201)
     async def add_customer(customer: Customer, db: Db) -> Customer:
@@ -37,7 +42,12 @@ def test_endpoints_read_and_write_through_the_apps_database(server, client):
             assert http.post("/sales", json=body).status_code == 201
         assert http.get("/customers/1").json() == ann
         assert http.get("/customers/2").status_code == 404
-        assert http.get("/spend").json() == [{"customer_id": 1, "orders": 2, "spent": "15.00"}]
+        # The view is read from its copy, which has the sales a moment after they are made.
+        deadline = time.monotonic() + 5
+        while (spend := http.get("/spend").json()) != [
+            {"customer_id": 1, "orders": 2, "spent": "15.00"}
+        ]:
+            assert time.monotonic() < deadline, spend
 
     row = app.openapi()["components"]["schemas"]["Spend"]
     assert list(row["properties"]) == ["customer_id", "orders", "spent"]
@@ -49,7 +59,7 @@ def test_a_websocket_follows_a_view(server, client):
     @app.websocket("/spend")
     async def spend(socket: WebSocket, db: Db):
         await socket.accept()
-        async for delta in db.changes(Spend, every=0.001):
+        async for delta in db.changes(Spend):
             await socket.send_json([row.model_dump(mode="json") for row in delta.added])
 
     with TestClient(app) as http, http.websocket_connect("/spend") as socket:

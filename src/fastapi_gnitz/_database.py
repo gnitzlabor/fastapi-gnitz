@@ -1,8 +1,9 @@
 """The database, read and written in the declared relations: rows are their models."""
 
 import asyncio
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -20,6 +21,11 @@ from fastapi_gnitz._view import View, ddl, held, kind, own
 # A write, not yet made: calling it submits it to the connection.
 type Write = Callable[[], Awaitable[object]]
 
+# How long the server holds a poll that has nothing new, before it is asked again.
+# A connection runs its calls one at a time, so one that holds a poll does nothing
+# else that long: it is a connection of its own, and closed without being waited for.
+_WAIT = 30.0
+
 # The Python type a column of each gnitz type is declared as.
 _PYTHON_TYPES: dict[str, type] = {
     **dict.fromkeys(("U8", "I8", "U16", "I16", "U32", "I32", "U64", "I64", "U128", "I128"), int),
@@ -35,7 +41,7 @@ _PYTHON_TYPES: dict[str, type] = {
 
 @dataclass(frozen=True, slots=True)
 class Delta[R]:
-    """How a view changed between two reads of `Database.changes`."""
+    """A view's value, or how it changed since the last one, from `Database.changes`."""
 
     reset: bool
     """`added` is the view's whole value: what was read before no longer counts."""
@@ -95,6 +101,7 @@ class Session:
         if offset is not None:
             sql += f" OFFSET {int(offset)}"
         (result,) = await self.client.execute_sql(sql)
+        assert result["type"] == "Rows"
         return _models(relation, result["rows"])
 
     async def get[R: Relation](self, relation: type[R], key: object) -> R | None:
@@ -165,12 +172,15 @@ class Database(Session):
 
     It is built on the event loop it is used on, and connected once built.
     `client` is the `gnitz` connection under it, for what this has no verb for.
+    It holds the copies of `mirror`, and reads a view from its copy by itself.
     """
 
     def __init__(self, target: str, *, schema: str = "public"):
         """Connect to `target`. `schema` is where a relation that declares no
         `__schema__` is."""
         super().__init__(aio.connect(target, schema), {})
+        self._target = target
+        self._following: list[asyncio.Task[None]] = []
 
     async def __aenter__(self) -> Self:
         return self
@@ -179,6 +189,8 @@ class Database(Session):
         await self.aclose()
 
     async def aclose(self) -> None:
+        for following in self._following:
+            following.cancel()
         await self.client.aclose()
 
     # -- definition ------------------------------------------------------------
@@ -193,7 +205,7 @@ class Database(Session):
         drop it to change what it selects.
         """
         statements = [ddl(relation, if_not_exists=True) for relation in relations]
-        for schema in {relation.__schema__ for relation in relations} - {None}:
+        for schema in {r.__schema__ for r in relations if r.__schema__ is not None}:
             try:
                 await self.client.create_schema(schema)
             except gnitz.GnitzRefusedError:
@@ -226,7 +238,7 @@ class Database(Session):
             # order they are made, so made with no await between them, these
             # let no other request's write in.
             transaction = self.client.transaction()
-            sent = [transaction.__aenter__()]
+            sent: list[Awaitable[object]] = [transaction.__aenter__()]
             try:
                 sent += [write() for write in writes]
             except BaseException as refused:  # as it was made: discard the others
@@ -251,40 +263,77 @@ class Database(Session):
         yield transaction
         await self._write(transaction._held)
 
-    # -- changes ---------------------------------------------------------------
+    # -- copies ----------------------------------------------------------------
 
-    async def changes[R: View](self, view: type[R], *, every: float) -> AsyncIterator[Delta[R]]:
-        """A view's value, then each change to it, asked for `every` seconds::
+    async def mirror(self, directory: str | os.PathLike[str], *views: type[View]) -> None:
+        """Hold a copy of each view in `directory`, and read them from it::
 
-            async for delta in db.changes(CustomerStats, every=0.5):
+            await db.mirror("/var/lib/app/mirror", CustomerStats)
+            stats = await db.all(CustomerStats)  # asks the server nothing
+
+        The copies follow the server's views: a commit that changes one is
+        in its copy a moment later, so a read just after a write may not show
+        it yet. Only a view that declares `__delta__` has a copy; one that is
+        dropped has none any more, and is read from the server again.
+
+        The directory is this process's own, and holds the copies from one
+        run to the next. Each view is followed on a connection of its own.
+        """
+        await self.client.mirror_at(os.fspath(directory))
+        try:
+            for view in views:
+                await self.client.mirror_view(qualified(own(view)))
+        except BaseException:
+            await self.client.close_mirror()
+            raise
+        self._following += [asyncio.create_task(self._follow(view)) for view in views]
+
+    async def _follow(self, view: type[View]) -> None:
+        """Bring the copies up to date whenever `view` changed."""
+        view_id, schema = await self._resolve(view)
+        bell = aio.connect(self._target, self.client.schema)
+        try:
+            # The changes since the copy's are read to learn that there are any;
+            # it is `poll` that takes them into the copy.
+            while (cursor := await self.client.cursor(view_id)) is not None:
+                with suppress(gnitz.GnitzDeltaExpiredError):  # which `poll` reads past
+                    await bell.delta_poll(view_id, schema, cursor, _WAIT)
+                await self.client.poll()
+        except gnitz.GnitzNotFoundError:  # dropped: it is read from the server again
+            await self.client.forget_view(view_id)
+        finally:
+            bell.aclose()
+
+    async def changes[R: View](self, view: type[R]) -> AsyncIterator[Delta[R]]:
+        """A view's value, then each change to it as it is committed::
+
+            async for delta in db.changes(CustomerStats):
                 ...
 
         The first `Delta` is a reset: the rows the view holds. One follows
         whenever the view changed, and another reset when gnitz no longer
-        holds the changes since the last read — the view outran its
+        holds the changes since the last one — the view outran its
         `__delta__`, or was created anew. Only a view that declares
         `__delta__` has changes to read.
+
+        Each call has a connection of its own for as long as it is iterated.
         """
-        if getattr(view, "__delta__", None) is None:
-            raise TypeError(f"{view!r} is not a view that declares __delta__")
-        # gnitz brings its views up to date when one is read, and a read of the
-        # changes is none: without this the last write would not show.
-        read = f"SELECT * FROM {qualified(view)} LIMIT 1"
-        while True:
-            view_id, schema = await self._resolve(view)
-            try:
-                await self.client.execute_sql(read)
-                rows, cursor = await self.client.delta_bootstrap(view_id, schema)
-                yield Delta(True, _models(view, rows), [])
-                while True:
-                    await asyncio.sleep(every)
-                    await self.client.execute_sql(read)
-                    rows, cursor = await self.client.delta_poll(view_id, schema, cursor)
-                    if len(rows):
-                        yield Delta(False, _models(view, rows), _models(view, rows, sign=-1))
-            except gnitz.GnitzDeltaExpiredError, gnitz.GnitzNotFoundError:
-                # Recreated, it is another relation; resolve it again.
-                self._resolved.pop(view, None)
+        client = aio.connect(self._target, self.client.schema)
+        try:
+            while True:
+                view_id, schema = await self._resolve(view)
+                try:
+                    rows, cursor = await client.delta_bootstrap(view_id, schema)
+                    yield Delta(True, _models(view, rows), [])
+                    while True:
+                        rows, cursor = await client.delta_poll(view_id, schema, cursor, _WAIT)
+                        if len(rows):
+                            yield Delta(False, _models(view, rows), _models(view, rows, sign=-1))
+                except gnitz.GnitzDeltaExpiredError, gnitz.GnitzNotFoundError:
+                    # Recreated, it is another relation; resolve it again.
+                    self._resolved.pop(view, None)
+        finally:
+            client.aclose()
 
 
 def _table[T: type[Table]](table: T) -> T:

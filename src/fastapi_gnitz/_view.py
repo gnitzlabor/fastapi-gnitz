@@ -103,7 +103,8 @@ class View[*Sources](Relation):
     what none of this expresses.
 
     `__delta__ = "64MB"` keeps that much of the view's changes on the server,
-    which is what `Database.changes` reads.
+    which is what `Database.mirror` keeps a local copy of the view up to date
+    by, and what `Database.changes` reads.
     """
 
     __sources__: ClassVar[tuple[tuple[Source, ...], ...]] = ()

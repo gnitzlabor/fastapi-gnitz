@@ -322,11 +322,46 @@ async def test_a_relation_is_in_the_schema_it_declares(db, client):
         client.drop_schema(schema)
 
 
+# -- copies --------------------------------------------------------------------
+
+
+async def test_a_mirrored_view_is_read_from_its_copy(shop, tmp_path):
+    class Quiet(View[Sale]):
+        id: int
+
+    await shop.create(Quiet)
+    with pytest.raises(gnitz.GnitzRefusedError, match="delta"):
+        await shop.mirror(tmp_path / "refused", Quiet)
+
+    await shop.mirror(tmp_path / "copies", Spend)
+    with pytest.raises(gnitz.GnitzRefusedError, match="already mirrors"):
+        await shop.mirror(tmp_path / "more", Spend)
+
+    await asyncio.sleep(0.01)  # by now the copy is followed, which is not to hold a read up
+    asked = await shop.client.requests_sent
+    assert await shop.get(Spend, 2) == Spend(customer_id=2, orders=1, spent=Decimal("400.00"))
+    assert [s.customer_id for s in await shop.all(Spend, where=Spend.orders > 1)] == [1]
+    async with shop.transaction() as tx:
+        assert len(await tx.all(Spend)) == 2
+    assert await shop.client.requests_sent == asked
+
+    await shop.insert(sale(4, 2, "100.00"))
+    async with asyncio.timeout(5):
+        while await shop.get(Spend, 2) != Spend(customer_id=2, orders=2, spent=Decimal("500.00")):
+            await asyncio.sleep(0)
+
+    # Dropped, it has no copy any more: created anew it is read from the server.
+    await shop.drop(Spend)
+    await shop.delete(Sale, 3, 4)
+    await shop.create(Spend)
+    assert await shop.all(Spend) == [Spend(customer_id=1, orders=2, spent=Decimal("200.00"))]
+
+
 # -- changes -------------------------------------------------------------------
 
 
 async def test_changes_are_the_views_value_and_then_what_changed(shop):
-    changes = shop.changes(Spend, every=0.001)
+    changes = shop.changes(Spend)
     first = await anext(changes)
     assert first.reset and first.removed == []
     assert sorted(s.customer_id for s in first.added) == [1, 2]
@@ -340,7 +375,7 @@ async def test_changes_are_the_views_value_and_then_what_changed(shop):
 
 
 async def test_changes_start_over_when_the_view_is_created_anew(shop):
-    changes = shop.changes(Spend, every=0.001)
+    changes = shop.changes(Spend)
     await anext(changes)
     await shop.drop(Spend)
     await shop.delete(Sale, 1, 2)
@@ -355,7 +390,7 @@ async def test_only_a_view_with_a_delta_has_changes(shop):
     class Quiet(View[Sale]):
         id: int
 
-    with refused("is not a view that declares __delta__"):
-        await anext(shop.changes(Quiet, every=1))
-    with refused("is not a view that declares __delta__"):
-        await anext(shop.changes(Sale, every=1))
+    await shop.create(Quiet)
+    for relation in Quiet, Sale:
+        with pytest.raises(gnitz.GnitzRefusedError, match="delta"):
+            await anext(shop.changes(relation))
