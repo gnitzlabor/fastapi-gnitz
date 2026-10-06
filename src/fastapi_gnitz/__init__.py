@@ -1,8 +1,9 @@
 """FastAPI integration for Gnitz: tables and views declared as Pydantic models, and
-the app's connection to the database.
+the app's database, which reads and writes them as those models.
 """
 
-from fastapi_gnitz._connection import Connection, get_connection, lifespan
+from fastapi_gnitz._connection import Db, get_db, lifespan
+from fastapi_gnitz._database import Database, Delta, Session, Transaction
 from fastapi_gnitz._expr import (
     coalesce,
     count,
@@ -19,20 +20,24 @@ from fastapi_gnitz._relation import PrimaryKey, Table, link
 from fastapi_gnitz._view import Cross, Exists, NotExists, NotNull, View, ddl
 
 __all__ = [
-    "Connection",
     "Cross",
+    "Database",
+    "Db",
+    "Delta",
     "Exists",
     "NotExists",
     "NotNull",
     "PrimaryKey",
+    "Session",
     "Table",
+    "Transaction",
     "View",
     "coalesce",
     "count",
     "count_distinct",
     "ddl",
     "desc",
-    "get_connection",
+    "get_db",
     "is_null",
     "lifespan",
     "link",

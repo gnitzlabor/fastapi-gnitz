@@ -98,7 +98,7 @@ class Path:
         if link is None:
             raise AttributeError(f"{relation.__name__} has no column or link {name!r}")
         target, hop = link.target, f"{alias}__{name}"
-        sql = f"{target.__relation__} {hop} ON {link.on(alias, hop)}"
+        sql = f"{qualified(target)} {hop} ON {link.on(alias, hop)}"
         join = Join(alias, name, sql, relation.__columns__[link.via].nullable)
         return Path(target, hop, {**self._reads, hop: join})
 
@@ -110,6 +110,15 @@ class ColumnType(NamedTuple):
     nullable: bool
     literals: tuple[Any, ...]
     metadata: list[Any]
+
+    @property
+    def precision(self) -> tuple[int | None, int | None]:
+        """The `max_digits` and `decimal_places` a Decimal column declares."""
+        digits, places = (
+            next((getattr(m, attr) for m in self.metadata if hasattr(m, attr)), None)
+            for attr in ("max_digits", "decimal_places")
+        )
+        return digits, places
 
 
 def column_type(field: FieldInfo) -> ColumnType:
@@ -162,6 +171,8 @@ class Relation(BaseModel):
 
     __relation__: ClassVar[str]
     """The relation's name in the database: the class name in snake case, unless set."""
+    __schema__: ClassVar[str | None] = None
+    """The schema it is in. Unset, it is in the one the connection resolves names in."""
     __alias__: ClassVar[str]
     """What a view calls it: `__relation__`, unless the class is an alias."""
     __columns__: ClassVar[dict[str, ColumnType]]
@@ -196,6 +207,8 @@ def declare(cls: type[Relation]) -> None:
     for what in (cls.__relation__, cls.__alias__):
         if not _IDENTIFIER.match(what) or "__" in what:
             raise TypeError(f"{cls.__name__}: {what!r} is not a usable relation name")
+    if cls.__schema__ is not None and not _IDENTIFIER.match(cls.__schema__):
+        raise TypeError(f"{cls.__name__}: {cls.__schema__!r} is not a usable schema name")
     cls.__columns__ = {name: column_type(field) for name, field in cls.model_fields.items()}
     cls.__links__ = cls.__links__ | {k: v for k, v in vars(cls).items() if isinstance(v, Link)}
     for name in (*cls.__columns__, *cls.__links__):
@@ -207,6 +220,19 @@ def declare(cls: type[Relation]) -> None:
 
 def is_alias(relation: type[Relation]) -> bool:
     return relation.__alias__ != relation.__relation__
+
+
+def qualified(relation: type[Relation]) -> str:
+    """The relation's name with its schema, where it declares one."""
+    if relation.__schema__ is None:
+        return relation.__relation__
+    return f"{relation.__schema__}.{relation.__relation__}"
+
+
+def named(relation: type[Relation]) -> str:
+    """The relation in a FROM clause, under the alias its columns are read by."""
+    name, alias = qualified(relation), relation.__alias__
+    return name if name == alias else f"{name} {alias}"
 
 
 def primary_keys(relation: type[Relation]) -> list[str]:
@@ -241,10 +267,7 @@ def _snake(name: str) -> str:
 
 def _sql_type(table: type[Relation], name: str, column: ColumnType) -> str:
     if column.base is Decimal:
-        digits, places = (
-            next((getattr(m, attr) for m in column.metadata if hasattr(m, attr)), None)
-            for attr in ("max_digits", "decimal_places")
-        )
+        digits, places = column.precision
         if digits is None or places is None:
             raise TypeError(
                 f"{table.__name__}.{name}: a Decimal column needs "
@@ -257,7 +280,8 @@ def _sql_type(table: type[Relation], name: str, column: ColumnType) -> str:
         raise TypeError(f"{table.__name__}.{name}: {column.base!r} is not a column type") from None
 
 
-def create_table(table: type[Relation]) -> str:
+def table_body(table: type[Relation]) -> str:
+    """What follows the table's name in the statement that creates it."""
     keys = primary_keys(table)
     if not keys:
         raise TypeError(f"{table.__name__} has no primary key")
@@ -274,5 +298,5 @@ def create_table(table: type[Relation]) -> str:
                 f"{table.__name__}.{link_name}: {link_.via} is {mine.__name__}, "
                 f"{target.__name__}.{key} is {theirs.__name__}"
             )
-        parts.append(f"FOREIGN KEY ({link_.via}) REFERENCES {target.__relation__}({key})")
-    return f"CREATE TABLE {table.__relation__} ({', '.join(parts)})"
+        parts.append(f"FOREIGN KEY ({link_.via}) REFERENCES {qualified(target)}({key})")
+    return f"({', '.join(parts)})"

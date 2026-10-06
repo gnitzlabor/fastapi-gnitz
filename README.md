@@ -69,35 +69,117 @@ HAVING COUNT(*) > 1
   of the views that read it instead of a relation of its own.
 - **By hand.** `__sql__ = "SELECT ..."` is a view's body as written, for what
   none of the above expresses.
+- **Schemas.** `__schema__ = "shop"` puts a relation in that schema; without
+  it, a relation is in the schema the connection resolves names in.
 
 A declaration that cannot be right is refused when the class is defined: a field
 whose type differs from its source column, a nullable source declared
 non-optional, sources nothing relates.
 
-## Connecting
+## Reading and writing
+
+A `Database` is a connection that speaks in the declared relations: rows go in
+and come out as their models.
 
 ```python
-from fastapi import FastAPI
-from fastapi_gnitz import Connection, lifespan
+from fastapi_gnitz import Database, desc
 
-app = FastAPI(lifespan=lifespan("/var/run/gnitz.sock"))
+async with Database("/var/run/gnitz.sock") as db:
+    await db.create(Customer, Sale, CustomerStats)
 
+    await db.insert(Customer(id=1, name="ann"))
+    await db.upsert(Sale(id=1, customer_id=1, status="paid", total=Decimal("9.50")))
+    await db.delete(Sale, 7, 8)
 
-@app.get("/items")
-async def items(conn: Connection):
-    result = await conn.scan(table_id, schema)
-    return [row._asdict() for row in result]
+    sale = await db.get(Sale, 1)  # or None
+    stats = await db.all(CustomerStats)
+    recent = await db.all(Sale, where=Sale.customer_id == 1, order_by=[desc(Sale.id)], limit=10)
+
+    async with db.transaction() as tx:
+        await tx.insert(Sale(id=2, customer_id=1, status="open", total=Decimal("1.00")))
+        await tx.delete(Sale, 1)
 ```
 
-`lifespan(target)` holds one `gnitz.aio` connection for the life of the app;
-`Connection` injects it into an endpoint. The declarations above are not wired
-to it yet: creating the relations and reading them as models is still by hand.
+- **`create`** creates what does not exist, in the order given, along with a
+  schema a relation declares. What exists is left alone, and refused if its
+  columns, their types or its key are not the declared ones. A view that
+  exists keeps its definition: `drop` it to change what it selects.
+- **`insert`** refuses a row whose key exists; **`upsert`** replaces it. One
+  call is one write, whatever tables its rows are of.
+- **`get`** reads by primary key. A view has one where it declares the
+  `PrimaryKey` gnitz keys it by, as a view grouped by that column does.
+- **`all`** takes a `where` and an `order_by` over the relation's own columns.
+  What relates two relations is a view.
+- **`transaction`** holds what is written through it, and writes it together
+  on leaving the block: all of it, or none if a write is refused. An exception
+  discards it. No other request's writes are taken in.
+- **`client`** is the `gnitz` connection underneath, for anything else.
+
+## In an app
+
+```python
+from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi_gnitz import Db, lifespan
+
+app = FastAPI(lifespan=lifespan("/var/run/gnitz.sock", create=[Customer, Sale, CustomerStats]))
+
+
+@app.post("/sales", status_code=201)
+async def add_sale(sale: Sale, db: Db) -> None:
+    await db.insert(sale)
+
+
+@app.get("/customers/{customer_id}")
+async def customer(customer_id: int, db: Db) -> Customer:
+    found = await db.get(Customer, customer_id)
+    if found is None:
+        raise HTTPException(404)
+    return found
+
+
+@app.get("/stats")
+async def stats(db: Db) -> list[CustomerStats]:
+    return await db.all(CustomerStats)
+```
+
+`lifespan(target, create=[...])` holds one `Database` for the life of the app
+and creates the relations when it starts; `Db` injects it into an endpoint.
+A table is the request body it validates, a view the response it documents.
+
+### Following a view
+
+A view that declares `__delta__` keeps that much of its changes on the server,
+and `changes` reads them: first the view's rows, then what was added and
+removed whenever it changed.
+
+```python
+class CustomerStats(View[Sale]):
+    __delta__ = "64MB"
+    ...
+
+
+@app.websocket("/stats")
+async def follow_stats(socket: WebSocket, db: Db):
+    await socket.accept()
+    async for delta in db.changes(CustomerStats, every=0.5):
+        await socket.send_json(
+            {
+                "reset": delta.reset,
+                "added": [row.model_dump(mode="json") for row in delta.added],
+                "removed": [row.model_dump(mode="json") for row in delta.removed],
+            }
+        )
+```
+
+A `Delta` with `reset` set holds the view's whole value in `added`: the first
+one does, and so does one that follows a gap gnitz no longer holds the changes
+for. gnitz does not push changes, so `changes` asks for them `every` seconds.
 
 ## Development
 
 ```bash
 uv sync
-cargo install gnitz@0.1.0 --locked --root .gnitz
+cargo install gnitz@0.1.3 --locked --root .gnitz
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
 uv run ty check

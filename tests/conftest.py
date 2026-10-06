@@ -11,6 +11,8 @@ from pathlib import Path
 import gnitz
 import pytest
 
+from fastapi_gnitz import Database
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SERVER = _REPO_ROOT / ".gnitz" / "bin" / "gnitz-server"
 _INSTALL = f"cargo install gnitz@{version('gnitz')} --locked --root .gnitz"
@@ -83,3 +85,10 @@ def client(server):
         conn.create_schema(name)
         yield conn
         conn.drop_schema(name)
+
+
+@pytest.fixture
+async def db(server, client):
+    """A `Database` in the schema of `client`."""
+    async with Database(server, schema=client.schema) as database:
+        yield database

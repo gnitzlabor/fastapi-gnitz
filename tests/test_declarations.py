@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 
 import gnitz
 import pytest
-from _shop import Customer, Employee, Money, Peer, Sale, Transfer, load
+from _shop import Customer, Employee, Money, Peer, Sale, Transfer, load, refused
 from annotated_types import Len, MultipleOf
 from pydantic import ValidationError
 
@@ -60,6 +60,47 @@ def test_relation_name_can_be_set():
     assert ddl(OrderIds) == "CREATE VIEW order_ids AS SELECT orders.id AS id FROM orders"
 
 
+def test_schema_and_delta_are_part_of_the_statement():
+    class Ledger(Table):
+        __schema__ = "books"
+        id: Annotated[int, PrimaryKey]
+        sale_id: int
+        parent_id: int | None
+        sale = link(Sale, via="sale_id")
+        parent = link(lambda: Ledger, via="parent_id")
+
+    class Posted(View[Ledger]):
+        __schema__ = "books"
+        __delta__ = "64MB"
+        id: int
+        parent_sale: int | None = Ledger.parent.sale_id
+
+    assert ddl(Ledger, if_not_exists=True) == (
+        "CREATE TABLE IF NOT EXISTS books.ledger (id BIGINT NOT NULL, sale_id BIGINT NOT NULL, "
+        "parent_id BIGINT, PRIMARY KEY (id), FOREIGN KEY (sale_id) REFERENCES sale(id), "
+        "FOREIGN KEY (parent_id) REFERENCES books.ledger(id))"
+    )
+    assert ddl(Posted) == (
+        "CREATE VIEW books.posted WITH (delta = '64MB') AS "
+        "SELECT ledger.id AS id, ledger__parent.sale_id AS parent_sale FROM books.ledger ledger "
+        "LEFT JOIN books.ledger ledger__parent ON ledger.parent_id = ledger__parent.id"
+    )
+    assert ddl(Posted, if_not_exists=True).startswith("CREATE VIEW IF NOT EXISTS books.posted ")
+
+    with refused("'Not A Schema' is not a usable schema name"):
+
+        class Bad(Table):
+            __schema__ = "Not A Schema"
+            id: Annotated[int, PrimaryKey]
+
+    with refused("an inline view is no relation"):
+
+        class Fragment(View[Sale]):
+            __inline__ = True
+            __schema__ = "x"
+            id: int
+
+
 def test_the_server_enforces_a_link(client):
     load(client)
     with pytest.raises(gnitz.GnitzError, match="Foreign Key violation"):
@@ -110,10 +151,6 @@ def test_a_condition_is_not_a_truth_value():
 
 
 # -- refusals ------------------------------------------------------------------
-
-
-def refused(match):
-    return pytest.raises(TypeError, match=match)
 
 
 def test_link_must_name_a_column():

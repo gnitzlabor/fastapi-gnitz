@@ -1,0 +1,345 @@
+"""The database, read and written in the declared relations: rows are their models."""
+
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
+from functools import partial
+from typing import Any, Literal, Self
+from uuid import UUID
+
+import gnitz
+from gnitz import aio
+
+from fastapi_gnitz._expr import Expr
+from fastapi_gnitz._relation import Relation, Table, named, primary_keys, qualified
+from fastapi_gnitz._view import View, ddl, held, kind, own
+
+# A write, not yet made: calling it submits it to the connection.
+type Write = Callable[[], Awaitable[object]]
+
+# The Python type a column of each gnitz type is declared as.
+_PYTHON_TYPES: dict[str, type] = {
+    **dict.fromkeys(("U8", "I8", "U16", "I16", "U32", "I32", "U64", "I64", "U128", "I128"), int),
+    **dict.fromkeys(("F32", "F64"), float),
+    "STRING": str,
+    "UUID": UUID,
+    "BLOB": bytes,
+    "DATE": date,
+    "TIMESTAMP": datetime,
+    "DECIMAL": Decimal,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class Delta[R]:
+    """How a view changed between two reads of `Database.changes`."""
+
+    reset: bool
+    """`added` is the view's whole value: what was read before no longer counts."""
+    added: list[R]
+    removed: list[R]
+
+
+class Session:
+    """The declared relations, read and written on one gnitz connection: what
+    a `Database` and a `Transaction` of it both are."""
+
+    def __init__(
+        self,
+        client: gnitz.AsyncGnitzClient,
+        resolved: dict[type[Relation], tuple[int, gnitz.Schema]],
+    ):
+        self.client = client
+        # What each relation resolved to, once it was found to be as declared.
+        self._resolved = resolved
+
+    async def _resolve(self, relation: type[Relation]) -> tuple[int, gnitz.Schema]:
+        found = self._resolved.get(relation)
+        if found is None:
+            found = await self.client.resolve_table(qualified(held(relation)))
+            _verify(relation, found[1])
+            self._resolved[relation] = found
+        return found
+
+    # -- reads -----------------------------------------------------------------
+
+    async def all[R: Relation](
+        self,
+        relation: type[R],
+        *,
+        where: object = None,
+        order_by: Sequence[object] = (),
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> list[R]:
+        """The rows of a table or a view, as its models::
+
+            await db.all(Sale, where=Sale.customer_id == 3, order_by=[desc(Sale.total)], limit=10)
+
+        `where` and `order_by` are over the relation's own columns: what
+        relates it to another relation is a view. Without `order_by` the rows
+        come in no particular order.
+        """
+        await self._resolve(relation)
+        # The columns are the declared ones, in their order: it resolved.
+        sql = f"SELECT * FROM {named(relation)}"
+        if where is not None:
+            sql += f" WHERE {_own(relation, where, 'where').sql}"
+        if order_by:
+            sql += " ORDER BY " + ", ".join(_own(relation, e, "order_by").sql for e in order_by)
+        if limit is not None:
+            sql += f" LIMIT {int(limit)}"
+        if offset is not None:
+            sql += f" OFFSET {int(offset)}"
+        (result,) = await self.client.execute_sql(sql)
+        return _models(relation, result["rows"])
+
+    async def get[R: Relation](self, relation: type[R], key: object) -> R | None:
+        """The row with the primary key `key`, or `None`. A compound key is the
+        tuple of its columns' values. A view has a key where it declares the
+        `PrimaryKey` that gnitz keys it by, as a view grouped by it does."""
+        relation_id, schema = await self._resolve(relation)
+        keys = primary_keys(relation)
+        if not keys:
+            raise TypeError(f"{relation.__name__} declares no PrimaryKey to get a row by")
+        if len(key if isinstance(key, tuple) else (key,)) != len(keys):
+            raise TypeError(f"{relation.__name__} is keyed by {', '.join(keys)}; got {key!r}")
+        rows = _models(relation, await self.client.seek(relation_id, schema, key))
+        return rows[0] if rows else None
+
+    # -- writes ----------------------------------------------------------------
+
+    async def insert(self, *rows: Table) -> None:
+        """Add rows, of any tables. A row whose key exists is refused, and then
+        none of the rows is added."""
+        await self._push(rows, "error")
+
+    async def upsert(self, *rows: Table) -> None:
+        """Add rows, of any tables, each replacing the row that has its key."""
+        await self._push(rows, "update")
+
+    async def delete(self, table: type[Table], *keys: object) -> None:
+        """Remove the rows of `table` with these primary keys; a compound key
+        is a tuple. A key no row has removes nothing."""
+        table_id, schema = await self._resolve(_table(table))
+        await self._write([partial(self.client.delete, table_id, schema, list(keys))])
+
+    async def _push(self, rows: Iterable[Table], mode: Literal["error", "update"]) -> None:
+        by_table: dict[type[Table], list[dict[str, Any]]] = {}
+        for row in rows:
+            by_table.setdefault(_table(type(row)), []).append(row.__dict__)
+        writes: list[Write] = []
+        for table, values in by_table.items():
+            table_id, schema = await self._resolve(table)
+            batch = gnitz.ZSetBatch(schema).extend(values)
+            writes.append(partial(self.client.push, table_id, batch, mode))
+        await self._write(writes)
+
+    async def _write(self, writes: list[Write]) -> None:
+        """Make the writes of one call."""
+        raise NotImplementedError
+
+
+class Transaction(Session):
+    """What `Database.transaction` gives: its writes are held, and made
+    together when the block is left."""
+
+    def __init__(self, database: Session):
+        super().__init__(database.client, database._resolved)
+        self._held: list[Write] = []
+
+    async def _write(self, writes: list[Write]) -> None:
+        self._held += writes
+
+
+class Database(Session):
+    """A connection to gnitz that speaks in the declared relations::
+
+        async with Database("/var/run/gnitz.sock") as db:
+            await db.create(Customer, Sale, CustomerStats)
+            await db.insert(Customer(id=1, name="ann"))
+            stats = await db.all(CustomerStats)
+
+    It is built on the event loop it is used on, and connected once built.
+    `client` is the `gnitz` connection under it, for what this has no verb for.
+    """
+
+    def __init__(self, target: str, *, schema: str = "public"):
+        """Connect to `target`. `schema` is where a relation that declares no
+        `__schema__` is."""
+        super().__init__(aio.connect(target, schema), {})
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        await self.client.aclose()
+
+    # -- definition ------------------------------------------------------------
+
+    async def create(self, *relations: type[Relation]) -> None:
+        """Create each relation that does not exist, in the order given: a
+        table after the tables it links to, a view after what it reads. A
+        schema a relation declares is created with it.
+
+        One that exists is left as it is, and refused if its columns or key
+        are not the declared ones. A view that exists keeps its definition:
+        drop it to change what it selects.
+        """
+        statements = [ddl(relation, if_not_exists=True) for relation in relations]
+        for schema in {relation.__schema__ for relation in relations} - {None}:
+            try:
+                await self.client.create_schema(schema)
+            except gnitz.GnitzRefusedError:
+                # It is refused where it exists, whoever created it.
+                catalog = gnitz.sys_schema(gnitz.SCHEMA_TAB)
+                found = {row.name for row in await self.client.scan(gnitz.SCHEMA_TAB, catalog)}
+                if schema not in found:
+                    raise
+        for relation, statement in zip(relations, statements, strict=True):
+            await self.client.execute_sql(statement)
+            self._resolved.pop(relation, None)
+            await self._resolve(relation)
+
+    async def drop(self, *relations: type[Relation]) -> None:
+        """Drop each relation, in the order given: a view before what it reads."""
+        for relation in relations:
+            statement = f"DROP {kind(own(relation))} {qualified(relation)}"
+            self._resolved.pop(relation, None)
+            await self.client.execute_sql(statement)
+
+    # -- writes ----------------------------------------------------------------
+
+    async def _write(self, writes: list[Write]) -> None:
+        if len(writes) == 1:
+            await writes[0]()
+        elif writes:
+            # One call is one write: the rows of several tables go in together.
+            # gnitz's transaction is the connection's, and takes in whatever is
+            # written while it is open. The connection runs its calls in the
+            # order they are made, so made with no await between them, these
+            # let no other request's write in.
+            transaction = self.client.transaction()
+            sent = [transaction.__aenter__()]
+            try:
+                sent += [write() for write in writes]
+            except BaseException as refused:  # as it was made: discard the others
+                await transaction.__aexit__(type(refused), refused, None)
+                raise
+            await asyncio.gather(*sent, transaction.__aexit__(None, None, None))
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[Transaction]:
+        """A transaction: what is written through it is written together, or
+        not at all::
+
+            async with db.transaction() as tx:
+                await tx.insert(sale)
+                await tx.delete(Cart, cart_id)
+
+        Leaving the block makes the writes, and it is then that one is
+        refused; an exception discards them. A read through `tx` does not see
+        them yet.
+        """
+        transaction = Transaction(self)
+        yield transaction
+        await self._write(transaction._held)
+
+    # -- changes ---------------------------------------------------------------
+
+    async def changes[R: View](self, view: type[R], *, every: float) -> AsyncIterator[Delta[R]]:
+        """A view's value, then each change to it, asked for `every` seconds::
+
+            async for delta in db.changes(CustomerStats, every=0.5):
+                ...
+
+        The first `Delta` is a reset: the rows the view holds. One follows
+        whenever the view changed, and another reset when gnitz no longer
+        holds the changes since the last read — the view outran its
+        `__delta__`, or was created anew. Only a view that declares
+        `__delta__` has changes to read.
+        """
+        if getattr(view, "__delta__", None) is None:
+            raise TypeError(f"{view!r} is not a view that declares __delta__")
+        # gnitz brings its views up to date when one is read, and a read of the
+        # changes is none: without this the last write would not show.
+        read = f"SELECT * FROM {qualified(view)} LIMIT 1"
+        while True:
+            view_id, schema = await self._resolve(view)
+            try:
+                await self.client.execute_sql(read)
+                rows, cursor = await self.client.delta_bootstrap(view_id, schema)
+                yield Delta(True, _models(view, rows), [])
+                while True:
+                    await asyncio.sleep(every)
+                    await self.client.execute_sql(read)
+                    rows, cursor = await self.client.delta_poll(view_id, schema, cursor)
+                    if len(rows):
+                        yield Delta(False, _models(view, rows), _models(view, rows, sign=-1))
+            except gnitz.GnitzDeltaExpiredError, gnitz.GnitzNotFoundError:
+                # Recreated, it is another relation; resolve it again.
+                self._resolved.pop(view, None)
+
+
+def _table[T: type[Table]](table: T) -> T:
+    """`table`, if rows are written to it."""
+    if not (isinstance(table, type) and issubclass(table, Table)):
+        raise TypeError(f"{table!r} is not a table")
+    return own(table)
+
+
+def _own(relation: type[Relation], expr: object, what: str) -> Expr:
+    """`expr`, if it is one over the columns of `relation` alone."""
+    name = relation.__name__
+    if not isinstance(expr, Expr) or expr.kind != "row":
+        raise TypeError(f"{what}: {expr!r} is not an expression over the columns of {name}")
+    if expr.reads.keys() - {relation.__alias__}:
+        raise TypeError(
+            f"{what}: {expr.sql} reads past {name}; what relates two relations is a view"
+        )
+    return expr
+
+
+def _models[R: Relation](relation: type[R], rows: Iterable[Any], *, sign: int = 1) -> list[R]:
+    """The rows of the sign as models, each as often as its weight says."""
+    return [
+        relation.model_validate(row._asdict()) for row in rows for _ in range(row._weight * sign)
+    ]
+
+
+def _verify(relation: type[Relation], schema: gnitz.Schema) -> None:
+    """Refuse a relation that is not in the database as it is declared."""
+    is_table = issubclass(relation, Table)
+
+    def column(name: str, base: type, nullable: bool, scale: int | None) -> str:
+        # Of a view, gnitz says nullable what a filter or a COALESCE keeps from
+        # being NULL, and a view's Decimal declares no scale.
+        if not is_table:
+            return f"{name} {base.__name__}"
+        scaled = f"({scale})" if base is Decimal else ""
+        return f"{name} {base.__name__}{scaled}{' | None' if nullable else ''}"
+
+    found = [
+        column(c.name, _PYTHON_TYPES[gnitz.TypeCode(c.type_code).name], c.is_nullable, c.scale)
+        for c in schema.columns
+        if not c.is_hidden
+    ]
+    declared = [
+        column(name, c.base, c.nullable, c.precision[1]) for name, c in relation.__columns__.items()
+    ]
+    keys = primary_keys(relation)
+    if is_table or keys:  # a view declares its key only where a row is read by it
+        key = [schema.columns[i] for i in schema.pk_indices]
+        found.append(f"PRIMARY KEY ({', '.join(c.name for c in key if not c.is_hidden)})")
+        declared.append(f"PRIMARY KEY ({', '.join(keys)})")
+    if found != declared:
+        raise TypeError(
+            f"{relation.__name__}: {qualified(relation)} is ({', '.join(found)}); "
+            f"declared is ({', '.join(declared)})"
+        )

@@ -1,11 +1,12 @@
-"""The tables the view tests read, and the rows in them."""
+"""The tables the tests read, a view of them, and the rows in them."""
 
 from decimal import Decimal
 from typing import Annotated
 
+import pytest
 from pydantic import Field
 
-from fastapi_gnitz import PrimaryKey, Table, ddl, link
+from fastapi_gnitz import PrimaryKey, Table, View, count, ddl, link, sum_
 
 Money = Annotated[Decimal, Field(max_digits=12, decimal_places=2)]
 
@@ -55,6 +56,18 @@ class Peer(Employee):
 
 
 TABLES = (Customer, Sale, Refund, Transfer, Employee)
+
+
+class Spend(View[Sale]):
+    __delta__ = "1MB"
+    customer_id: Annotated[int, PrimaryKey]
+    orders: int = count()
+    spent: Decimal = sum_(Sale.total)
+
+
+def refused(match):
+    return pytest.raises(TypeError, match=match)
+
 
 ROWS = """
 INSERT INTO customer VALUES (1, 'ann', 'DE', 1), (2, 'bob', 'DE', NULL), (3, 'cy', 'FR', 2),

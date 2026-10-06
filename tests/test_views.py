@@ -23,7 +23,6 @@ from fastapi_gnitz import (
     coalesce,
     count,
     count_distinct,
-    ddl,
     desc,
     is_null,
     max_,
@@ -96,7 +95,7 @@ def a_group_of_constraints_is_its_members():
 def a_fragment_says_its_kind():
     class Average(View[Sale]):
         customer_id: int
-        mean: Decimal = sql("AVG({})", Sale.total, kind="aggregate")
+        mean: float = sql("AVG({})", Sale.total, kind="aggregate")
 
     return Average
 
@@ -541,18 +540,16 @@ def bag(client, relation):
 
 
 @pytest.mark.parametrize(("declare", "written"), CASES)
-def test_generated_view_holds_the_rows_of_the_written_one(client, declare, written):
+async def test_generated_view_holds_the_rows_of_the_written_one(client, db, declare, written):
     load(client)
     declared = declare()
     views = declared if isinstance(declared, tuple) else (declared,)
-    for view in views:
-        client.execute_sql(ddl(view))
+    await db.create(*views)  # which refuses a view whose columns are not the declared ones
     client.execute_sql(f"CREATE VIEW written AS {written}")
 
-    generated = bag(client, views[-1].__relation__)
+    view = views[-1]
+    generated = bag(client, view.__relation__)
     assert generated, "the case selects nothing, so it compares nothing"
     assert generated == bag(client, "written")
-
-    _, schema = client.resolve_table(views[-1].__relation__)
-    visible = [column.name for column in schema.columns if not column.is_hidden]
-    assert visible == list(views[-1].model_fields)
+    models = collections.Counter(tuple(dict(row).values()) for row in await db.all(view))
+    assert models == generated

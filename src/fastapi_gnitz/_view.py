@@ -6,7 +6,15 @@ from typing import Any, ClassVar, Literal, NamedTuple, get_args, get_origin
 from annotated_types import Ge, Gt, Le, Lt, MaxLen, MinLen, MultipleOf, Predicate
 
 from fastapi_gnitz._expr import KINDS, Column, Expr, Kind, render
-from fastapi_gnitz._relation import ColumnType, Relation, create_table, declare, is_alias
+from fastapi_gnitz._relation import (
+    ColumnType,
+    Relation,
+    declare,
+    is_alias,
+    named,
+    qualified,
+    table_body,
+)
 
 _COMPARISONS = ((Gt, "gt", ">"), (Ge, "ge", ">="), (Lt, "lt", "<"), (Le, "le", "<="))
 
@@ -93,12 +101,16 @@ class View[*Sources](Relation):
     `__inline__ = True` makes a view a fragment: no relation of its own, a CTE
     in each view that reads it. `__sql__` set by hand is the view's body, for
     what none of this expresses.
+
+    `__delta__ = "64MB"` keeps that much of the view's changes on the server,
+    which is what `Database.changes` reads.
     """
 
     __sources__: ClassVar[tuple[tuple[Source, ...], ...]] = ()
     """The sources of each SELECT: of the one, or of each member of a union."""
     __where__: ClassVar[Any] = None
     __inline__: ClassVar[bool] = False
+    __delta__: ClassVar[str | None] = None
     __sql__: ClassVar[str]
     __ctes__: ClassVar[dict[str, str]] = {}
 
@@ -116,6 +128,10 @@ class View[*Sources](Relation):
             return
         if hasattr(cls.__mro__[1], "__relation__"):
             raise TypeError(f"{cls.__name__}: a view is not extended; read it as a source instead")
+        if cls.__inline__ and (cls.__schema__ is not None or cls.__delta__ is not None):
+            raise TypeError(
+                f"{cls.__name__}: an inline view is no relation, so it has no schema and no delta"
+            )
         if "__sql__" in vars(cls):
             if cls.__sources__ or cls.__definitions__ or cls.__where__ is not None:
                 raise TypeError(f"{cls.__name__}: a view with __sql__ declares only its columns")
@@ -139,21 +155,37 @@ class View[*Sources](Relation):
             cls.__sql__ = f"WITH {with_} {cls.__sql__}"
 
 
-def ddl(relation: type[Relation]) -> str:
-    """The statement that creates `relation`."""
+def held[T: type[Relation]](item: T) -> T:
+    """`item`, if the database holds it: a declared table or view, or an alias of one."""
+    relation = _relation(item)
+    if issubclass(relation, View) and relation.__inline__:
+        raise TypeError(f"{relation.__name__} is inline; it is no relation of its own")
+    return relation  # ty: ignore[invalid-return-type]
+
+
+def own[T: type[Relation]](item: T) -> T:
+    """`item`, if it is a relation of its own in the database: held, and no alias."""
+    relation = held(item)
     if is_alias(relation):
         raise TypeError(f"{relation.__name__} is an alias of {relation.__mro__[1].__name__}")
-    if not issubclass(relation, View):
-        return create_table(relation)
-    if relation.__inline__:
-        raise TypeError(f"{relation.__name__} is inline; it is no relation of its own")
-    return f"CREATE VIEW {relation.__relation__} AS {relation.__sql__}"
+    return relation
 
 
-def _from(relation: type[Relation]) -> str:
-    if is_alias(relation):
-        return f"{relation.__relation__} {relation.__alias__}"
-    return relation.__relation__
+def kind(relation: type[Relation]) -> Literal["TABLE", "VIEW"]:
+    return "VIEW" if issubclass(relation, View) else "TABLE"
+
+
+def ddl(relation: type[Relation], *, if_not_exists: bool = False) -> str:
+    """The statement that creates `relation`."""
+    relation = own(relation)
+    if issubclass(relation, View):
+        delta = relation.__delta__
+        with_ = "" if delta is None else f"WITH (delta = {render(delta)}) "
+        body = f"{with_}AS {relation.__sql__}"
+    else:
+        body = table_body(relation)
+    exists = " IF NOT EXISTS" if if_not_exists else ""
+    return f"CREATE {kind(relation)}{exists} {qualified(relation)} {body}"
 
 
 def _link_conditions(a: type[Relation], b: type[Relation]) -> list[tuple[str, str, str]]:
@@ -248,12 +280,12 @@ def _select(view: type[View], sources: tuple[Source, ...]) -> str:
     if where is not None:
         clauses[where.kind].append(where.sql)
 
-    sql = f"SELECT {', '.join(select)} FROM {_from(joined[0].relation)}"
+    sql = f"SELECT {', '.join(select)} FROM {named(joined[0].relation)}"
     by_source_list = set()
     for source in sources[1:]:
         relation, how = source
         if how == "CROSS JOIN":
-            sql += f" CROSS JOIN {_from(relation)}"
+            sql += f" CROSS JOIN {named(relation)}"
             continue
         # A join is along a link to a source before it, a semi-join to any.
         others = joined[: joined.index(source)] if source in joined else joined
@@ -266,12 +298,12 @@ def _select(view: type[View], sources: tuple[Source, ...]) -> str:
             )
         on, alias, link = found[0]
         if source not in joined:
-            clauses["row"].append(f"{how} (SELECT 1 FROM {_from(relation)} WHERE {on})")
+            clauses["row"].append(f"{how} (SELECT 1 FROM {named(relation)} WHERE {on})")
             continue
         by_source_list.add((alias, link))
         if source is joined[1] and joined[0].mode == "LEFT JOIN":  # the first source is optional
             how = "FULL JOIN" if how == "LEFT JOIN" else "RIGHT JOIN"
-        sql += f" {how} {_from(relation)} ON {on}"
+        sql += f" {how} {named(relation)} ON {on}"
     for alias, join in paths.items():
         if (join.parent, join.link) in by_source_list:
             raise TypeError(

@@ -1,31 +1,61 @@
-import httpx
-from fastapi import FastAPI
+from _shop import Customer, Sale, Spend
+from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi.testclient import TestClient
 
-from fastapi_gnitz import Connection, lifespan
+from fastapi_gnitz import Db, lifespan
 
 
-async def test_endpoint_reads_through_the_app_connection(server, client):
-    client.execute_sql(
-        "CREATE TABLE items (id BIGINT NOT NULL PRIMARY KEY, qty BIGINT NOT NULL); "
-        "INSERT INTO items VALUES (1, 10), (2, 20)"
-    )
-    table_id, schema = client.resolve_table("items")
+def test_endpoints_read_and_write_through_the_apps_database(server, client):
+    app = FastAPI(lifespan=lifespan(server, schema=client.schema, create=[Customer, Sale, Spend]))
 
-    app = FastAPI(lifespan=lifespan(server))
+    @app.post("/customers", status_code=201)
+    async def add_customer(customer: Customer, db: Db) -> Customer:
+        await db.insert(customer)
+        return customer
 
-    @app.get("/items")
-    async def items(conn: Connection):
-        return [row._asdict() for row in await conn.scan(table_id, schema)]
+    @app.post("/sales", status_code=201)
+    async def add_sale(sale: Sale, db: Db) -> None:
+        await db.insert(sale)
 
-    transport = httpx.ASGITransport(app=app)
-    async with (
-        app.router.lifespan_context(app),
-        httpx.AsyncClient(transport=transport, base_url="http://test") as http,
-    ):
-        response = await http.get("/items")
+    @app.get("/customers/{customer_id}")
+    async def customer(customer_id: int, db: Db) -> Customer:
+        found = await db.get(Customer, customer_id)
+        if found is None:
+            raise HTTPException(404)
+        return found
 
-    assert response.status_code == 200
-    assert sorted(response.json(), key=lambda r: r["id"]) == [
-        {"id": 1, "qty": 10},
-        {"id": 2, "qty": 20},
-    ]
+    @app.get("/spend")
+    async def spend(db: Db) -> list[Spend]:
+        return await db.all(Spend)
+
+    ann = {"id": 1, "name": "ann", "country": "DE", "tier": None}
+    with TestClient(app) as http:
+        assert http.post("/customers", json=ann).status_code == 201
+        assert http.post("/customers", json={"id": 2}).status_code == 422
+        for id_, total in ((1, "10.50"), (2, "4.50")):
+            body = {"id": id_, "customer_id": 1, "status": "paid", "total": total, "qty": 1}
+            assert http.post("/sales", json=body).status_code == 201
+        assert http.get("/customers/1").json() == ann
+        assert http.get("/customers/2").status_code == 404
+        assert http.get("/spend").json() == [{"customer_id": 1, "orders": 2, "spent": "15.00"}]
+
+    row = app.openapi()["components"]["schemas"]["Spend"]
+    assert list(row["properties"]) == ["customer_id", "orders", "spent"]
+
+
+def test_a_websocket_follows_a_view(server, client):
+    app = FastAPI(lifespan=lifespan(server, schema=client.schema, create=[Customer, Sale, Spend]))
+
+    @app.websocket("/spend")
+    async def spend(socket: WebSocket, db: Db):
+        await socket.accept()
+        async for delta in db.changes(Spend, every=0.001):
+            await socket.send_json([row.model_dump(mode="json") for row in delta.added])
+
+    with TestClient(app) as http, http.websocket_connect("/spend") as socket:
+        assert socket.receive_json() == []
+        client.execute_sql(
+            "INSERT INTO customer VALUES (1, 'ann', 'DE', NULL); "
+            "INSERT INTO sale VALUES (1, 1, 'paid', 10.50, 1)"
+        )
+        assert socket.receive_json() == [{"customer_id": 1, "orders": 1, "spent": "10.50"}]
