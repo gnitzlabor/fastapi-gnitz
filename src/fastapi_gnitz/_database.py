@@ -30,6 +30,7 @@ _WAIT = 30.0
 _PYTHON_TYPES: dict[str, type] = {
     **dict.fromkeys(("U8", "I8", "U16", "I16", "U32", "I32", "U64", "I64", "U128", "I128"), int),
     **dict.fromkeys(("F32", "F64"), float),
+    "BOOLEAN": bool,
     "STRING": str,
     "UUID": UUID,
     "BLOB": bytes,
@@ -90,10 +91,7 @@ class Session:
         come in no particular order.
         """
         await self._resolve(relation)
-        # The columns are the declared ones, in their order: it resolved.
-        sql = f"SELECT * FROM {named(relation)}"
-        if where is not None:
-            sql += f" WHERE {_own(relation, where, 'where').sql}"
+        sql = _select(relation, where)
         if order_by:
             sql += " ORDER BY " + ", ".join(_own(relation, e, "order_by").sql for e in order_by)
         if limit is not None:
@@ -304,7 +302,9 @@ class Database(Session):
         finally:
             bell.aclose()
 
-    async def changes[R: View](self, view: type[R]) -> AsyncIterator[Delta[R]]:
+    async def changes[R: View](
+        self, view: type[R], *, where: object = None
+    ) -> AsyncIterator[Delta[R]]:
         """A view's value, then each change to it as it is committed::
 
             async for delta in db.changes(CustomerStats):
@@ -316,17 +316,26 @@ class Database(Session):
         `__delta__`, or was created anew. Only a view that declares
         `__delta__` has changes to read.
 
+        `where` is a condition over the view's columns, as `all` takes one.
+        The view is then read as the rows it keeps, and gnitz sends no others:
+        a row is added when it comes to meet the condition and removed when it
+        no longer does, and a commit that changes none of them is not heard of.
+
         Each call has a connection of its own for as long as it is iterated.
         """
+        select = None if where is None else _select(view, where)
         client = aio.connect(self._target, self.client.schema)
         try:
             while True:
                 view_id, schema = await self._resolve(view)
+                spec = None  # the view whole
                 try:
-                    rows, cursor = await client.delta_bootstrap(view_id, schema)
+                    if select is not None:
+                        view_id, schema, spec = await client.subscription(select)
+                    rows, cursor = await client.delta_bootstrap(view_id, schema, spec)
                     yield Delta(True, _models(view, rows), [])
                     while True:
-                        rows, cursor = await client.delta_poll(view_id, schema, cursor, _WAIT)
+                        rows, cursor = await client.delta_poll(view_id, schema, cursor, _WAIT, spec)
                         if len(rows):
                             yield Delta(False, _models(view, rows), _models(view, rows, sign=-1))
                 except gnitz.GnitzDeltaExpiredError, gnitz.GnitzNotFoundError:
@@ -341,6 +350,15 @@ def _table[T: type[Table]](table: T) -> T:
     if not (isinstance(table, type) and issubclass(table, Table)):
         raise TypeError(f"{table!r} is not a table")
     return own(table)
+
+
+def _select(relation: type[Relation], where: object) -> str:
+    """The SELECT of the rows of `relation` that `where` keeps, or of them all."""
+    # The columns are the declared ones, in their order, once it resolved.
+    sql = f"SELECT * FROM {named(relation)}"
+    if where is not None:
+        sql += f" WHERE {_own(relation, where, 'where').sql}"
+    return sql
 
 
 def _own(relation: type[Relation], expr: object, what: str) -> Expr:

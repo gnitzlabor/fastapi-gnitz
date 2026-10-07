@@ -90,8 +90,9 @@ class View[*Sources](Relation):
     them by. `View[A | B]` is `A UNION ALL B`.
 
     **Fields.** A bare field is the source column of that name; a field given a
-    value is defined by that expression. Once a field is an aggregate, the
-    others are the GROUP BY keys.
+    value is defined by that expression, and a condition is a `bool` one:
+    `big: bool = Sale.total > 100`. Once a field is an aggregate, the others
+    are the GROUP BY keys.
 
     **Filters.** What a field's type says of every row is the view's filter: a
     `Literal`, or a `Gt` / `Ge` / `Lt` / `Le` bound — WHERE on a column, HAVING

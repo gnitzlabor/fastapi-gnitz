@@ -53,8 +53,9 @@ HAVING COUNT(*) > 1
 ```
 
 - **Fields.** A bare field is the source column of that name. A field given a
-  value is defined by that expression. Once a field is an aggregate, the others
-  are the `GROUP BY` keys.
+  value is defined by that expression, and a condition is a `bool` one:
+  `big: bool = Sale.total > 100`. Once a field is an aggregate, the others are
+  the `GROUP BY` keys.
 - **Filters.** What a field's type says of every row is the view's filter: a
   `Literal`, or a `Gt` / `Ge` / `Lt` / `Le` bound. It lands in `WHERE` for a
   column, `HAVING` for an aggregate, `QUALIFY` for a window function.
@@ -200,11 +201,16 @@ one does, and so does one that follows a gap gnitz no longer holds the changes
 for. The view declares `__delta__`. gnitz holds the request until the view
 changes, so each `changes` has a connection of its own while it is iterated.
 
+`db.changes(CustomerStats, where=CustomerStats.spent > 1000)` follows only the
+rows the condition keeps, as `all` reads them. gnitz applies it: a row is added
+when it comes to meet the condition and removed when it no longer does, and a
+commit that changes no such row sends nothing.
+
 ## Development
 
 ```bash
 uv sync
-cargo install gnitz@0.1.4 --locked --root .gnitz
+cargo install gnitz@0.1.5 --locked --root .gnitz
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
 uv run ty check

@@ -41,7 +41,9 @@ def test_every_column_type_is_one_the_server_takes(client):
         day: date
         at: datetime
         ident: uuid.UUID
+        ok: bool
 
+    assert "ok BOOLEAN NOT NULL, " in ddl(Everything)
     client.execute_sql(ddl(Everything))
     _, schema = client.resolve_table("everything")
     assert [schema.columns[i].name for i in schema.pk_indices] == ["a", "b"]

@@ -24,6 +24,7 @@ _IDENTIFIER = re.compile(r"[a-z_][a-z0-9_]*\Z")
 
 # What gnitz's SQL has a type name for. A TIMESTAMP holds no time zone.
 _SQL_TYPES: dict[type, str] = {
+    bool: "BOOLEAN",
     int: "BIGINT",
     float: "DOUBLE",
     str: "TEXT",

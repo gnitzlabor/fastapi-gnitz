@@ -41,10 +41,12 @@ async def test_rows_come_back_as_the_models_that_went_in(db):
         at: datetime
         ident: uuid.UUID
         amount: Money
+        ok: bool
+        sure: bool | None
 
     row = Everything(
         a=1, b=2, f=1.5, s=None, day=date(2026, 1, 2), at=datetime(2026, 1, 2, 3, 4, 5, 678),
-        ident=uuid.uuid4(), amount=Decimal("3.50"),
+        ident=uuid.uuid4(), amount=Decimal("3.50"), ok=False, sure=None,
     )  # fmt: skip
     await db.create(Everything)
     await db.insert(row)
@@ -374,6 +376,38 @@ async def test_changes_are_the_views_value_and_then_what_changed(shop):
     await changes.aclose()
 
 
+async def test_changes_under_a_condition_are_of_the_rows_it_keeps(shop):
+    changes = shop.changes(Spend, where=Spend.spent > 300)
+    first = await anext(changes)
+    assert first.reset and first.added == [Spend(customer_id=2, orders=1, spent=Decimal("400.00"))]
+
+    # A row the condition does not keep changes, and nothing is heard of it: the
+    # next change is the one that brings it in.
+    await shop.insert(sale(4, 1, "50.00"))
+    await shop.insert(sale(5, 1, "100.00"))
+    delta = await asyncio.wait_for(anext(changes), 5)
+    assert not delta.reset and delta.removed == []
+    assert delta.added == [Spend(customer_id=1, orders=4, spent=Decimal("350.00"))]
+
+    await shop.delete(Sale, 3)
+    delta = await asyncio.wait_for(anext(changes), 5)
+    assert delta.added == []
+    assert delta.removed == [Spend(customer_id=2, orders=1, spent=Decimal("400.00"))]
+
+    # Created anew, it is read under the condition again.
+    await shop.drop(Spend)
+    await shop.delete(Sale, 5)
+    await shop.create(Spend)
+    await shop.insert(sale(6, 2, "900.00"))
+    again = await asyncio.wait_for(anext(changes), 5)
+    assert again.reset
+    assert again.added == [Spend(customer_id=2, orders=1, spent=Decimal("900.00"))]
+    await changes.aclose()
+
+    with refused("reads past Spend"):
+        await anext(shop.changes(Spend, where=Sale.id == 1))
+
+
 async def test_changes_start_over_when_the_view_is_created_anew(shop):
     changes = shop.changes(Spend)
     await anext(changes)
@@ -394,3 +428,5 @@ async def test_only_a_view_with_a_delta_has_changes(shop):
     for relation in Quiet, Sale:
         with pytest.raises(gnitz.GnitzRefusedError, match="delta"):
             await anext(shop.changes(relation))
+        with pytest.raises(gnitz.GnitzRefusedError, match="delta"):
+            await anext(shop.changes(relation, where=relation.id > 1))

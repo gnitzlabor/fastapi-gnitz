@@ -23,7 +23,7 @@ classifiers      = [
 dependencies     = [
     "annotated-types>=0.7",
     "fastapi>=0.115",
-    "gnitz>=0.1.4",
+    "gnitz>=0.1.5",
     "pydantic>=2.11",
 ]
 

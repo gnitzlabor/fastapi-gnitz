@@ -152,6 +152,32 @@ def raw_fragment():
     return Bucketed
 
 
+@case(
+    "SELECT s.id, s.total > 100 AS big, c.tier IS NULL AS untiered "
+    "FROM sale s JOIN customer c ON s.customer_id = c.id"
+)
+def a_condition_is_a_bool_field():
+    class Sized(View[Sale]):
+        id: int
+        big: bool = Sale.total > 100
+        untiered: bool = is_null(Sale.customer.tier)
+
+    return Sized
+
+
+@case("SELECT id FROM (SELECT id, total > 100 AS big FROM sale) s WHERE big")
+def a_bool_field_is_a_condition():
+    class Big(View[Sale]):
+        id: int
+        big: bool = Sale.total > 100
+
+    class BigSale(View[Big]):
+        __where__ = Big.big
+        id: int
+
+    return Big, BigSale
+
+
 # -- aggregates ----------------------------------------------------------------
 
 
